@@ -1,0 +1,88 @@
+{
+  "id": "cinehax-plus",
+  "name": "CineHax+",
+  "version": "1.0.0",
+  "description": "Creado por JuandreXter - Películas y series en español latino, castellano y subtitulado de CineHax+",
+  "author": "JuandreXter",
+  "repo": "cinehax-plus/cinehax-plus",
+  "entry": "plugin.js",
+  "icon": "icon.png",
+  "apiVersion": 6,
+  "browser": true,
+  "section": {
+    "label": "CineHax+"
+  },
+  "languages": [
+    "Latino",
+    "Castellano",
+    "Subtitulado"
+  ],
+  "capabilities": [
+    "home",
+    "discover",
+    "search",
+    "meta",
+    "streams"
+  ],
+  "tabs": [
+    "home",
+    "discover",
+    "search",
+    "library",
+    "settings"
+  ],
+  "newsImageStyle": "poster",
+  "episodesPagination": {
+    "enabled": true,
+    "perPage": 24
+  },
+  "theme": {
+    "accent": "#2563EB",
+    "onAccent": "#FFFFFF",
+    "background": "#0B0C14",
+    "surface": "#1B1F2E",
+    "highlight": "#6EE7A8"
+  },
+  "config": [
+    {
+      "key": "pestanas",
+      "label": "Contenido a mostrar",
+      "type": "select",
+      "default": "ambas",
+      "options": [
+        "ambas",
+        "peliculas",
+        "series"
+      ],
+      "description": "Qué categorías y listas priorizar en el repositorio (ambas / peliculas / series)."
+    },
+    {
+      "key": "preferred_language",
+      "label": "Idioma preferido",
+      "type": "language",
+      "default": "Latino",
+      "options": [
+        "Latino",
+        "Castellano",
+        "Subtitulado"
+      ],
+      "description": "Idioma preferido al elegir servidor de reproducción automáticamente."
+    },
+    {
+      "key": "base_url",
+      "label": "Dominio de CineHax+",
+      "type": "url",
+      "default": "https://cinehaxplus.com",
+      "placeholder": "https://cinehaxplus.com",
+      "description": "URL base del sitio web (por si cambia de dominio en el futuro).",
+      "required": false
+    }
+  ],
+  "notices": [
+    {
+      "id": "aviso_primera_version_v1",
+      "title": "🚀 ¡Bienvenido a CineHax+ (Primera Versión)!",
+      "message": "Esta es la primera versión oficial del repositorio adaptada para la app. Si encuentras algún error al cargar algún título, catálogo o servidor, no te preocupes: se irá solucionando y optimizando en futuras actualizaciones."
+    }
+  ]
+}
