@@ -1,0 +1,17 @@
+{
+  "apiVersion": 6,
+  "maxApiVersion": 6,
+  "categories": ["movies", "series"],
+  "browser": true,
+  "telemetry": false,
+  "capabilities": {
+    "names": ["home", "discover", "search", "meta", "streams"],
+    "required": ["home", "streams"],
+    "needsApproval": ["browser"]
+  },
+  "manifest": {
+    "browser": {
+      "consentLine": "Este repo puede abrir páginas web ocultas (WebView) para extraer el video de algunos servidores (ej. VOE)."
+    }
+  }
+}

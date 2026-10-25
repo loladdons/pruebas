@@ -1,0 +1,52 @@
+{
+  "id": "cuevana-pro",
+  "name": "Cuevana Pro",
+  "version": "1.0.0",
+  "description": "Películas y series en Español Latino, Castellano e Inglés desde Cuevana. Primera versión portada — se esperan mejoras en extractores y estabilidad.",
+  "author": "xuper-plugin (port)",
+  "repo": "cuevana-pro",
+  "entry": "plugin.js",
+  "icon": "icon.png",
+  "apiVersion": 6,
+  "browser": true,
+  "section": {
+    "label": "Cuevana Pro"
+  },
+  "languages": ["Latino", "Castellano", "Inglés"],
+  "capabilities": ["home", "discover", "search", "meta", "streams"],
+  "tabs": ["home", "discover", "search", "library", "settings"],
+  "newsImageStyle": "banner",
+  "episodesPagination": {
+    "enabled": true,
+    "perPage": 25
+  },
+  "theme": {
+    "accent": "#3B82F6",
+    "onAccent": "#FFFFFF",
+    "background": "#08101F",
+    "surface": "#111C33",
+    "highlight": "#93C5FD"
+  },
+  "config": [
+    {
+      "key": "pref_lang",
+      "label": "Idioma preferido",
+      "type": "select",
+      "default": "latino",
+      "description": "Se prioriza este idioma al listar servidores. Si falla, se ofrecen los demás.",
+      "options": [
+        { "id": "latino", "label": "Latino" },
+        { "id": "spanish", "label": "Castellano" },
+        { "id": "english", "label": "Inglés" }
+      ]
+    }
+  ],
+  "notices": [
+    {
+      "id": "v1-first",
+      "title": "¡Primera versión de Cuevana Pro!",
+      "message": "Este repositorio es la versión 1.0.0 (port inicial). Incluye catálogo, búsqueda, detalles, episodios y servidores. Se esperan mejoras en extractores de video, estabilidad de mirrors y más opciones. ¡Gracias por probar!",
+      "buttonText": "Entendido"
+    }
+  ]
+}
