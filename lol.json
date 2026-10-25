@@ -1,8 +1,8 @@
 {
   "id": "cuevana-pro",
   "name": "Cuevana Pro",
-  "version": "1.0.0",
-  "description": "Películas y series en Español Latino, Castellano e Inglés desde Cuevana. Primera versión portada — se esperan mejoras en extractores y estabilidad.",
+  "version": "1.0.1",
+  "description": "Películas y series en Español Latino, Castellano e Inglés desde Cuevana. v1.0.1 — fix exports CommonJS para que la app cargue getHome/getStreams/etc.",
   "author": "xuper-plugin (port)",
   "repo": "cuevana-pro",
   "entry": "plugin.js",
@@ -12,9 +12,25 @@
   "section": {
     "label": "Cuevana Pro"
   },
-  "languages": ["Latino", "Castellano", "Inglés"],
-  "capabilities": ["home", "discover", "search", "meta", "streams"],
-  "tabs": ["home", "discover", "search", "library", "settings"],
+  "languages": [
+    "Latino",
+    "Castellano",
+    "Inglés"
+  ],
+  "capabilities": [
+    "home",
+    "discover",
+    "search",
+    "meta",
+    "streams"
+  ],
+  "tabs": [
+    "home",
+    "discover",
+    "search",
+    "library",
+    "settings"
+  ],
   "newsImageStyle": "banner",
   "episodesPagination": {
     "enabled": true,
@@ -35,9 +51,18 @@
       "default": "latino",
       "description": "Se prioriza este idioma al listar servidores. Si falla, se ofrecen los demás.",
       "options": [
-        { "id": "latino", "label": "Latino" },
-        { "id": "spanish", "label": "Castellano" },
-        { "id": "english", "label": "Inglés" }
+        {
+          "id": "latino",
+          "label": "Latino"
+        },
+        {
+          "id": "spanish",
+          "label": "Castellano"
+        },
+        {
+          "id": "english",
+          "label": "Inglés"
+        }
       ]
     }
   ],
