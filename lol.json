@@ -1,8 +1,8 @@
 {
   "id": "magis-live",
   "name": "Magis Live TV",
-  "version": "1.0.0",
-  "description": "TV en vivo Magis / Xuper. Requiere cuenta (email + contraseña). Usa el protocolo del portal (3DES + sesión).",
+  "version": "1.0.1",
+  "description": "TV en vivo Magis / Xuper. Solo requiere email y contraseña. Hosts y clave del portal van fijos en el código (igual que el lib original).",
   "author": "MagisLive",
   "logo": "https://i.imgur.com/8QKQqQq.png",
   "icon": "https://i.imgur.com/8QKQqQq.png",
@@ -26,23 +26,7 @@
       "type": "password",
       "required": true,
       "placeholder": "••••••••",
-      "description": "Se guarda cifrada en la caché del repo (solo en este dispositivo)."
-    },
-    {
-      "key": "hosts",
-      "label": "Hosts del portal (opcional)",
-      "type": "text",
-      "required": false,
-      "placeholder": "bcdod.faolmbghu.com,osuhk.m3x8o50te.com",
-      "description": "Separados por coma. Si vacío, se usan los por defecto."
-    },
-    {
-      "key": "desKeyHex",
-      "label": "Clave 3DES (hex, opcional)",
-      "type": "text",
-      "required": false,
-      "placeholder": "e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8",
-      "description": "Solo si el portal cambió la clave. 24 bytes en hex."
+      "description": "Se guarda en la caché del repo solo en este dispositivo."
     }
   ],
   "theme": {

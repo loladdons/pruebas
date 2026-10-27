@@ -4,9 +4,8 @@
  * Sesión: anónimo (snToken + active) o login (v8/login)
  * Live: v6/getLiveData + v4/startPlayLive + v14/getSlbInfo
  *
- * Config requerida (lol.json):
- *   email, password  → cuenta Magis
- *   hosts, desKeyHex → opcionales
+ * Config (lol.json): solo email + password.
+ * Hosts, clave 3DES, appId y portalCode van FIJOS (MagisConfig.defaults del lib).
  *
  * Nota: el player de la app debe enviar los headers Content-Auth / Content-License
  * en cada request HLS. Si el player no reenvía headers a segmentos, la
@@ -828,25 +827,14 @@ async function resolveChannel(channelCode) {
 
 /**
  * La app llama setConfig(configMap) al cargar el repo.
- * keys: email, password, hosts, desKeyHex
+ * Solo se aceptan email y password. Hosts/clave NO se pueden cambiar.
  */
 function setConfig(config) {
   if (!config || typeof config !== 'object') return;
   if (config.email) STATE.email = String(config.email).trim();
   if (config.password) STATE.password = String(config.password);
-  if (config.hosts) {
-    var h = String(config.hosts)
-      .split(/[\s,;]+/)
-      .map(function (x) {
-        return x.trim();
-      })
-      .filter(Boolean);
-    if (h.length) CFG.hosts = h;
-  }
-  if (config.desKeyHex && String(config.desKeyHex).trim().length >= 48) {
-    CFG.desKeyHex = String(config.desKeyHex).trim();
-  }
-  // limpiar sesión al cambiar cuenta
+  // Hosts, desKeyHex, appId, portal: fijos desde MagisConfig.defaults del lib.
+  // No se permiten overrides desde la config del repo.
   STATE.userToken = '';
   STATE.userId = '';
   STATE.categoriesCache = null;

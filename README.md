@@ -15,16 +15,18 @@ Usa el **mismo protocolo** del lib Dart `magis_live` (portal Magis/Xuper): cifra
 
 1. Sube esta carpeta a un repo de GitHub (ej. `tu-usuario/magis-live`).
 2. En el launcher → **Comunidad / Instalar repo** → pega `tu-usuario/magis-live`.
-3. Abre **Configuración del repo** e introduce:
+3. Abre **Configuración del repo** e introduce **solo**:
    - **Email / Usuario Magis**
    - **Contraseña**
-   - (Opcional) hosts o clave 3DES si el portal cambió.
 4. En Home del repo verás categorías y canales. Al abrir un canal se llama a `getStreams`.
 
 ## Config (lol.json)
 
-La app guarda la config por `repoId + key` (caché local).  
-Sin email/password el home muestra un aviso de configuración.
+Solo pide **email** y **password**.  
+Hosts, clave 3DES, `appId` y `portalCode` están **fijos en el código** (igual que `MagisConfig.defaults` de tu lib original). No se pueden editar desde la UI.
+
+La app guarda email/password por `repoId + key` (caché local).  
+Sin cuenta el home muestra un aviso de configuración.
 
 ## Limitación importante (playback)
 
@@ -58,7 +60,7 @@ El repo JS sirve para **listar canales y probar** el protocolo; el proxy local d
 
 ## API del plugin (exports)
 
-- `setConfig(map)` — email, password, hosts, desKeyHex  
+- `setConfig(map)` — **solo** `email`, `password` (hosts/clave fijos)  
 - `getHome()` → filas de categorías / canales  
 - `search(query)`  
 - `getMeta(id)` — id = `magis:CHANNEL_CODE`  
@@ -69,20 +71,18 @@ El repo JS sirve para **listar canales y probar** el protocolo; el proxy local d
 El JS runtime de la app ya carga **crypto-js** (assets).  
 Se usa TripleDES ECB + MD5 estándar + TweakedMd5 portado a mano para `sign_o3`.
 
-## Hosts por defecto
+## Portal fijo (desde tu lib original)
 
-```
-bcdod.faolmbghu.com
-osuhk.m3x8o50te.com
-```
+No editable. Valores de `MagisConfig.defaults`:
 
-Clave 3DES por defecto (hex 24 bytes):
-
-```
-e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8
-```
-
-(Igual que `MagisConfig.defaults` en tu lib.)
+| Campo | Valor |
+|-------|--------|
+| hosts | `bcdod.faolmbghu.com`, `osuhk.m3x8o50te.com` |
+| desKeyHex | `e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8` |
+| appId | `com.android.msandroid` |
+| apkVersion | `49902` |
+| portalCode | `masnew` |
+| scheme | `https` |
 
 ## Licencia / uso
 
