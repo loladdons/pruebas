@@ -22,7 +22,7 @@ const DEFAULTS = {
   desKeyHex: 'e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8',
   newsLimit: '12',
   // Opcional: clave TMDB (solo enriquece stills de capítulos / posters si falta). Sin clave no hace nada.
-  tmdbApiKey: ''
+  tmdbApiKey: 'a2d9bbed370d9f678e34006f8750a5a5'
 };
 const API_VERSION = '43404';
 const SPKG_VERSION = '2025-08-07 05:40:11_36_16_';
