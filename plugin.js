@@ -1,369 +1,184 @@
-/**
- * Magis Live TV — plugin para Nuvio / lolplus launcher
- * Protocolo portal: body = hex(base64(3DES-EDE/ECB/PKCS5(json)))
- * Sesión: anónimo (snToken + active) o login (v8/login)
- * Live: v6/getLiveData + v4/startPlayLive + v14/getSlbInfo
+/*
+ * Magis Service Catalog - optimizado + fixes:
+ *  - Discover: filtros tipo + categoría funcionan juntos (no solo el primero)
+ *  - Episodios de otras temporadas: resuelve contentId real del capítulo
+ *  - Subtítulos: extrae todos los tracks del play response para el player
  *
- * Config (lol.json): solo email + password.
- * Hosts, clave 3DES, appId y portalCode van FIJOS (MagisConfig.defaults del lib).
- *
- * Nota: el player de la app debe enviar los headers Content-Auth / Content-License
- * en cada request HLS. Si el player no reenvía headers a segmentos, la
- * reproducción puede fallar; en ese caso usa el módulo Dart MagisLiveService
- * (lib) con LiveHlsProxy.
+ * Perf (Home / Buscar / Descubrir) — sin cambiar la extracción de datos Magis:
+ *  - Home: homeRows de movies/series/anime en paralelo
+ *  - Descubrir: ROOT directo si no hay categoría; menos beans getShelveData;
+ *    pageSize bajo en filtros; posters (imageStyle poster) no banner
+ *  - Caché TTL un poco más larga en home/discover
+ *  - TMDB opcional (config.tmdbApiKey): solo stills de capítulos ya listados por Magis
  */
-
 'use strict';
 
-// ─── Config / estado ───────────────────────────────────────────────────────
-var CFG = {
-  desKeyHex: 'e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8',
-  hosts: ['osuhk.m3x8o50te.com', 'oogoy.f30c96w8.com', 'bcdod.faolmbghu.com'],
+const ADDON_ID = 'magis-service-catalog';
+const DEFAULTS = {
+  hosts: 'sqacjy.s5lm5aydc.xyz,osuhk.m3x8o50te.com',
+  scheme: 'https',
   appId: 'com.android.msandroid',
   apkVersion: '49902',
-  scheme: 'https',
-  portalCode: 'masnew',
-  spkgVer: '2025-08-07 05:40:11_36_16_',
-  snTokenSalt: 'ntFT65w6itH!lHCPw7D=@qnsFC5adD28',
-  passwordSalt: 'cloudstream',
-  fixedMac: '02:00:00:00:00:00',
-  liveRoot: 'masnew_live',
-  allCategoryId: 76182,
+  desKeyHex: 'e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8',
+  newsLimit: '12',
+  // Opcional: clave TMDB (solo enriquece stills de capítulos / posters si falta). Sin clave no hace nada.
+  tmdbApiKey: ''
+};
+const API_VERSION = '43404';
+const SPKG_VERSION = '2025-08-07 05:40:11_36_16_';
+const PORTAL_CODE = 'masnew';
+const SN_SALT = 'ntFT65w6itH!lHCPw7D=@qnsFC5adD28';
+const FIXED_MAC = '02:00:00:00:00:00';
+const HOME = { movies: 'masnew_movies', series: 'masnew_series', anime: 'masnew_anime', featured: 'masnew_featured' };
+const ROOT = { movies: '76263', series: '76235', anime: '76209' };
+
+let session = null;
+let sessionPromise = null;
+let preferredHost = null;
+let lastCallAt = 0;
+let rateQueue = Promise.resolve();
+
+const MAX_CACHE = 120;
+const MAX_MAP = 500;
+
+const responseCache = new Map();
+const inFlight = new Map();
+const categoryKinds = new Map();
+const itemKinds = new Map();
+// parentSeriesId:season:episode -> episode contentId
+const episodeContentIds = new Map();
+// episode contentId -> parent series contentId
+const episodeParent = new Map();
+// parentSeriesId:seasonNumber -> contentId de esa temporada en Magis
+const seasonContentIds = new Map();
+// episode contentId -> contentId de su temporada (startPlayVOD.seriesContentId)
+const episodeSeasonId = new Map();
+// categoryId -> { items, kind, title }  (estilo Kino: assetList de getNextColumns)
+const categoryItemsCache = new Map();
+
+const CACHE_TTL = {
+  getHome: 8 * 60e3,
+  getNextColumns: 8 * 60e3,
+  'v3/getShelveData': 3 * 60e3,
+  'v3/getRecommends': 8 * 60e3,
+  'v3/searchByName': 30e3,
+  'v4/getItemData': 6 * 60e3,
+  'v14/getSlbInfo': 8 * 60e3
 };
 
-var STATE = {
-  userId: '',
-  userToken: '',
-  jwtToken: '',
-  sn: '',
-  email: '',
-  password: '',
-  preferredHost: null,
-  categoriesCache: null,
-  channelsCache: {},
-  lastCallMs: 0,
-};
+function limitMap(map, max) {
+  while (map.size > max) {
+    const first = map.keys().next().value;
+    map.delete(first);
+  }
+}
 
-// ─── Utilidades ────────────────────────────────────────────────────────────
-function log() {
+function cacheKey(path, bean) {
+  return path + ':' + JSON.stringify(bean || {});
+}
+
+async function cached(key, ttl, work) {
+  const now = Date.now();
+  const hit = responseCache.get(key);
+  if (hit && hit.expires > now) return hit.value;
+  if (hit) responseCache.delete(key);
+  if (inFlight.has(key)) return inFlight.get(key);
+
+  const task = Promise.resolve()
+    .then(work)
+    .then(value => {
+      if (ttl > 0) {
+        responseCache.set(key, { value, expires: Date.now() + ttl });
+        limitMap(responseCache, MAX_CACHE);
+      }
+      return value;
+    })
+    .finally(() => inFlight.delete(key));
+
+  inFlight.set(key, task);
+  return task;
+}
+
+function timeoutError(e) {
+  const m = String(e && (e.name || e.message) || e).toLowerCase();
+  return m.includes('abort') || m.includes('timeout');
+}
+
+async function rateTurn() {
+  let release;
+  const previous = rateQueue;
+  rateQueue = new Promise(resolve => { release = resolve; });
+  await previous;
   try {
-    if (typeof console !== 'undefined' && console.log) {
-      console.log.apply(console, ['[MagisLive]'].concat([].slice.call(arguments)));
-    }
+    const wait = Math.max(0, 300 - (Date.now() - lastCallAt));
+    if (wait) await new Promise(r => setTimeout(r, wait));
+    lastCallAt = Date.now();
+  } finally {
+    release();
+  }
+}
+
+function config() {
+  let supplied = {};
+  try {
+    const all = globalThis.__nuvioConfig || {};
+    supplied = all[ADDON_ID] || all.current || {};
   } catch (_) {}
+  const c = Object.assign({}, DEFAULTS, supplied);
+  c.hosts = String(c.hosts || DEFAULTS.hosts).split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
+  c.scheme = String(c.scheme || 'https').replace(':', '');
+  return c;
 }
 
-function hexToBytes(hex) {
-  var clean = String(hex || '').replace(/[^0-9a-fA-F]/g, '');
-  var out = [];
-  for (var i = 0; i < clean.length; i += 2) {
-    out.push(parseInt(clean.substr(i, 2), 16));
+function cryptoJS() {
+  if (typeof CryptoJS === 'undefined' || !CryptoJS.TripleDES) {
+    throw new Error('CryptoJS no está disponible en el runtime');
   }
-  return out;
+  return CryptoJS;
 }
 
-function bytesToHex(bytes) {
-  var s = '';
-  for (var i = 0; i < bytes.length; i++) {
-    var h = (bytes[i] & 0xff).toString(16);
-    if (h.length < 2) h = '0' + h;
-    s += h;
-  }
-  return s;
-}
-
-function utf8Encode(str) {
-  if (typeof TextEncoder !== 'undefined') {
-    return Array.from(new TextEncoder().encode(str));
-  }
-  var out = [];
-  for (var i = 0; i < str.length; i++) {
-    var c = str.charCodeAt(i);
-    if (c < 0x80) out.push(c);
-    else if (c < 0x800) {
-      out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
-    } else if (c < 0xd800 || c >= 0xe000) {
-      out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-    } else {
-      i++;
-      var c2 = str.charCodeAt(i);
-      var u = 0x10000 + (((c & 0x3ff) << 10) | (c2 & 0x3ff));
-      out.push(
-        0xf0 | (u >> 18),
-        0x80 | ((u >> 12) & 0x3f),
-        0x80 | ((u >> 6) & 0x3f),
-        0x80 | (u & 0x3f)
-      );
-    }
-  }
-  return out;
-}
-
-function utf8Decode(bytes) {
-  if (typeof TextDecoder !== 'undefined') {
-    return new TextDecoder().decode(new Uint8Array(bytes));
-  }
-  var s = '';
-  for (var i = 0; i < bytes.length; ) {
-    var b = bytes[i++];
-    if (b < 0x80) s += String.fromCharCode(b);
-    else if (b < 0xe0) s += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i++] & 0x3f));
-    else if (b < 0xf0) {
-      s += String.fromCharCode(
-        ((b & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f)
-      );
-    } else {
-      var u =
-        ((b & 0x07) << 18) |
-        ((bytes[i++] & 0x3f) << 12) |
-        ((bytes[i++] & 0x3f) << 6) |
-        (bytes[i++] & 0x3f);
-      u -= 0x10000;
-      s += String.fromCharCode(0xd800 + (u >> 10), 0xdc00 + (u & 0x3ff));
-    }
-  }
-  return s;
-}
-
-function pkcs5Pad(data) {
-  var block = 8;
-  var pad = block - (data.length % block);
-  var out = data.slice();
-  for (var i = 0; i < pad; i++) out.push(pad);
-  return out;
-}
-
-function pkcs5Unpad(data) {
-  if (!data || !data.length) return data;
-  var pad = data[data.length - 1];
-  if (pad < 1 || pad > 8 || pad > data.length) return data;
-  return data.slice(0, data.length - pad);
-}
-
-// Base64 (sin depender de btoa en todos los runtimes)
-var B64 =
-  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-function base64Encode(bytes) {
-  var out = '';
-  for (var i = 0; i < bytes.length; i += 3) {
-    var a = bytes[i],
-      b = i + 1 < bytes.length ? bytes[i + 1] : 0,
-      c = i + 2 < bytes.length ? bytes[i + 2] : 0;
-    out += B64[a >> 2];
-    out += B64[((a & 3) << 4) | (b >> 4)];
-    out += i + 1 < bytes.length ? B64[((b & 15) << 2) | (c >> 6)] : '=';
-    out += i + 2 < bytes.length ? B64[c & 63] : '=';
-  }
-  return out;
-}
-
-function base64Decode(str) {
-  str = String(str).replace(/=+$/, '');
-  var out = [];
-  for (var i = 0; i < str.length; i += 4) {
-    var a = B64.indexOf(str[i]),
-      b = B64.indexOf(str[i + 1]),
-      c = B64.indexOf(str[i + 2]),
-      d = B64.indexOf(str[i + 3]);
-    out.push((a << 2) | (b >> 4));
-    if (c >= 0) out.push(((b & 15) << 4) | (c >> 2));
-    if (d >= 0) out.push(((c & 3) << 6) | d);
-  }
-  return out;
-}
-
-// ─── 3DES (CryptoJS si está, sino error claro) ─────────────────────────────
-function ensureCrypto() {
-  if (typeof CryptoJS === 'undefined') {
-    throw new Error(
-      'CryptoJS no está cargado. El runtime de la app debe inyectar crypto-js (assets).'
-    );
-  }
-}
-
-function encryptBody(plain) {
-  ensureCrypto();
-  var keyWords = CryptoJS.enc.Hex.parse(CFG.desKeyHex);
-  var encrypted = CryptoJS.TripleDES.encrypt(plain, keyWords, {
-    mode: CryptoJS.mode.ECB,
-    padding: CryptoJS.pad.Pkcs7,
+function encryptBody(value) {
+  const c = config(), C = cryptoJS();
+  const key = C.enc.Hex.parse(c.desKeyHex);
+  const encrypted = C.TripleDES.encrypt(String(value), key, {
+    mode: C.mode.ECB,
+    padding: C.pad.Pkcs7
   });
-  // CryptoJS da Base64 del ciphertext; Magis espera hex(utf8(base64))
-  var b64 = encrypted.toString(); // Base64
-  return bytesToHex(utf8Encode(b64));
+  const b64 = encrypted.ciphertext.toString(C.enc.Base64);
+  return C.enc.Utf8.parse(b64).toString(C.enc.Hex);
 }
 
 function decryptBlob(wire) {
-  ensureCrypto();
-  var inner = utf8Decode(hexToBytes(wire));
-  var keyWords = CryptoJS.enc.Hex.parse(CFG.desKeyHex);
-  var decrypted = CryptoJS.TripleDES.decrypt(
-    { ciphertext: CryptoJS.enc.Base64.parse(inner) },
-    keyWords,
-    { mode: CryptoJS.mode.ECB, padding: CryptoJS.pad.Pkcs7 }
-  );
-  return decrypted.toString(CryptoJS.enc.Utf8);
+  const C = cryptoJS();
+  const b64 = C.enc.Utf8.stringify(C.enc.Hex.parse(String(wire)));
+  const params = C.lib.CipherParams.create({ ciphertext: C.enc.Base64.parse(b64) });
+  return C.TripleDES.decrypt(params, C.enc.Hex.parse(config().desKeyHex), {
+    mode: C.mode.ECB,
+    padding: C.pad.Pkcs7
+  }).toString(C.enc.Utf8);
 }
 
-// ─── MD5 estándar (para sn) ────────────────────────────────────────────────
-function md5Hex(str) {
-  ensureCrypto();
-  return CryptoJS.MD5(str).toString(CryptoJS.enc.Hex);
+function randHex(n) {
+  let out = '';
+  for (let i = 0; i < n; i++) out += Math.floor(Math.random() * 256).toString(16).padStart(2, '0');
+  return out;
 }
 
-// ─── Tweaked MD5 (sign_o3) — port de TweakedMd5.kt ─────────────────────────
-var TMD5_SALT = utf8Encode('salt3333=4');
-var TMD5_S = [
-  7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5,
-  9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,
-  16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15,
-  21,
-];
-var TMD5_KT = (function () {
-  var t = [];
-  for (var i = 0; i < 64; i++) {
-    t[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0;
-  }
-  return t;
-})();
-var TMD5_ROUND1 = [
-  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-];
-var TMD5_G = (function () {
-  var g = [];
-  for (var i = 0; i < 64; i++) {
-    if (i < 16) g[i] = TMD5_ROUND1[i];
-    else if (i < 32) g[i] = (5 * i + 1) % 16;
-    else if (i < 48) g[i] = (3 * i + 5) % 16;
-    else g[i] = (7 * i) % 16;
-  }
-  return g;
-})();
-
-function rotl(x, n) {
-  var u = x >>> 0;
-  return ((u << n) | (u >>> (32 - n))) >>> 0;
+function randMac() {
+  return Array.from({ length: 6 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join(':');
 }
 
-function tmd5Compress(state, block, off) {
-  var m = [];
-  for (var j = 0; j < 16; j++) {
-    var p = off + j * 4;
-    m[j] =
-      (block[p] & 0xff) |
-      ((block[p + 1] & 0xff) << 8) |
-      ((block[p + 2] & 0xff) << 16) |
-      ((block[p + 3] & 0xff) << 24);
-  }
-  var a = state[0],
-    b = state[1],
-    c = state[2],
-    d = state[3];
-  for (var i = 0; i < 64; i++) {
-    var f;
-    if (i < 16) f = (b & c) | (~b & d);
-    else if (i < 32) f = (d & b) | (~d & c);
-    else if (i < 48) f = b ^ c ^ d;
-    else f = c ^ (b | ~d);
-    f = f >>> 0;
-    var sum = (f + a + TMD5_KT[i] + m[TMD5_G[i]]) >>> 0;
-    a = d;
-    d = c;
-    c = b;
-    b = (b + rotl(sum, TMD5_S[i])) >>> 0;
-  }
-  state[0] = (state[0] + a) >>> 0;
-  state[1] = (state[1] + b) >>> 0;
-  state[2] = (state[2] + c) >>> 0;
-  state[3] = (state[3] + d) >>> 0;
+function md5(s) {
+  return cryptoJS().MD5(String(s)).toString().toLowerCase();
 }
 
-function tweakedMd5Hex(msgBytes) {
-  var state = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
-  var remainder = msgBytes.length % 64;
-  var i = 0;
-  while (i + 64 <= msgBytes.length - remainder) {
-    tmd5Compress(state, msgBytes, i);
-    i += 64;
-  }
-  var tail = msgBytes.slice(msgBytes.length - remainder);
-  var padLen = ((56 - (tail.length + 1)) % 64 + 64) % 64;
-  var padding = [];
-  for (var p = 0; p < padLen; p++) padding.push(0);
-  var bits = msgBytes.length * 8;
-  var length = [];
-  for (var k = 0; k < 8; k++) length.push((bits >>> (k * 8)) & 0xff);
-  var finalBlock = tail.concat([0x80], padding, length);
-  for (var j = 0; j < finalBlock.length; j += 64) {
-    tmd5Compress(state, finalBlock, j);
-  }
-  var sb = '';
-  for (var w = 0; w < 4; w++) {
-    for (var b = 0; b < 4; b++) {
-      var hx = ((state[w] >>> (b * 8)) & 0xff).toString(16);
-      if (hx.length < 2) hx = '0' + hx;
-      sb += hx;
-    }
-  }
-  return sb;
-}
-
-function signO3(token, startMoment) {
-  var prefix =
-    'token=' +
-    token +
-    '&sign2_method=sign_o3&instance=0&start_moment=' +
-    startMoment;
-  var bytes = utf8Encode(prefix).concat(TMD5_SALT);
-  return tweakedMd5Hex(bytes);
-}
-
-// ─── HTTP (fetch del runtime) ──────────────────────────────────────────────
-function httpPost(url, headers, body) {
-  return new Promise(function (resolve, reject) {
-    // El runtime de la app expone fetch / axios vía puente
-    var opts = {
-      method: 'POST',
-      headers: headers || {},
-      body: body,
-    };
-    var p;
-    if (typeof fetch === 'function') {
-      p = fetch(url, opts).then(function (r) {
-        return r.text().then(function (t) {
-          return { status: r.status, body: t };
-        });
-      });
-    } else if (typeof httpFetch === 'function') {
-      p = httpFetch(url, opts);
-    } else {
-      reject(new Error('No hay fetch HTTP en el runtime JS'));
-      return;
-    }
-    p.then(resolve).catch(reject);
-  });
-}
-
-function sleep(ms) {
-  return new Promise(function (r) {
-    setTimeout(r, ms);
-  });
-}
-
-async function throttle() {
-  var now = Date.now();
-  var delta = now - STATE.lastCallMs;
-  if (delta < 400) await sleep(400 - delta);
-  STATE.lastCallMs = Date.now();
-}
-
-function deviceDict(snOverride) {
+function deviceDict(sn) {
   return {
     loginType: '2',
     appLanguage: 'en',
-    apkVersion: CFG.apkVersion,
-    sysVersion: CFG.spkgVer,
-    appId: CFG.appId,
+    apkVersion: config().apkVersion,
+    sysVersion: SPKG_VERSION,
+    appId: config().appId,
     hardwareInfo: 'ranchu',
     model: 'sdk_gphone64_arm64',
     product: 'sdk_gphone64_arm64',
@@ -371,803 +186,1579 @@ function deviceDict(snOverride) {
     B29: '',
     reserve1: '',
     deviceToken: '',
-    sn: snOverride != null ? snOverride : STATE.sn || '',
+    sn: sn || (session && session.sn) || '',
     drmId: '',
-    sdkVer: 36,
+    sdkVer: 36
   };
 }
 
-function hostOrder() {
-  var hosts = CFG.hosts.filter(Boolean);
-  if (!hosts.length) return [];
-  if (STATE.preferredHost && hosts.indexOf(STATE.preferredHost) >= 0) {
-    return [STATE.preferredHost].concat(
-      hosts.filter(function (h) {
-        return h !== STATE.preferredHost;
-      })
-    );
-  }
-  return hosts;
-}
-
-async function portalCall(path, bean, opts) {
-  opts = opts || {};
-  var baseFields = opts.baseFields !== false;
-  var bodyMap = {};
-  if (baseFields) {
-    bodyMap.portalCode = CFG.portalCode;
-    bodyMap.userId = STATE.userId || '';
-    bodyMap.userToken = STATE.userToken || '';
-  }
-  if (bean) {
-    for (var k in bean) if (Object.prototype.hasOwnProperty.call(bean, k)) bodyMap[k] = bean[k];
-  }
-  var dd = deviceDict(opts.sn);
-  for (var d in dd) if (Object.prototype.hasOwnProperty.call(dd, d)) bodyMap[d] = dd[d];
-
-  var plain = JSON.stringify(bodyMap);
-  var wire = encryptBody(plain);
-  var headers = {
-    'Content-Type': 'application/json;charset=utf-8',
-    apk: CFG.appId,
-    apkVer: '43404',
-    spkgVer: CFG.spkgVer,
-    'User-Agent': 'okhttp/3.12.12',
-  };
-
-  await throttle();
-  var lastError = null;
-  var hosts = hostOrder();
-  for (var hi = 0; hi < hosts.length; hi++) {
-    var host = hosts[hi];
-    var url = CFG.scheme + '://' + host + '/api/portalCore/' + path;
-    try {
-      var res = await httpPost(url, headers, wire);
-      if (!res || res.status < 200 || res.status >= 300) {
-        lastError = 'HTTP ' + (res && res.status);
-        continue;
-      }
-      var j = JSON.parse(res.body);
-      var rc = String(j.returnCode != null ? j.returnCode : j.retCode != null ? j.retCode : '');
-      if (rc && rc !== '0' && rc !== '0000' && rc !== '200') {
-        var msg = String(j.returnMsg || j.retMsg || j.msg || j.message || rc);
-        return { ok: false, code: rc, message: msg };
-      }
-      STATE.preferredHost = host;
-      var dataField = j.data;
-      if (typeof dataField === 'string' && dataField.trim()) {
-        try {
-          var decrypted = decryptBlob(dataField.trim());
-          var inner = JSON.parse(decrypted);
-          return { ok: true, data: inner };
-        } catch (e) {
-          try {
-            var inner2 = JSON.parse(dataField);
-            return { ok: true, data: inner2 };
-          } catch (_) {
-            lastError = 'decrypt: ' + e;
-            continue;
-          }
-        }
-      }
-      if (dataField && typeof dataField === 'object') {
-        return { ok: true, data: dataField };
-      }
-      return { ok: true, data: j };
-    } catch (e) {
-      lastError = e;
-    }
-  }
+function hardwareFingerprint() {
   return {
-    ok: false,
-    code: 'network',
-    message: 'todos los hosts fallaron: ' + lastError,
-  };
-}
-
-// ─── Sesión ────────────────────────────────────────────────────────────────
-async function ensureAnonymous() {
-  if (STATE.userToken) return { ok: true };
-  if (STATE.sn) {
-    var act = await activate('');
-    if (act.ok) return act;
-  }
-  return mintDevice();
-}
-
-async function mintDevice() {
-  function rndHex(n) {
-    var s = '';
-    for (var i = 0; i < n; i++) s += ((Math.random() * 256) | 0).toString(16).padLeft(2, '0');
-    return s;
-  }
-  // padLeft polyfill inline
-  if (!String.prototype.padLeft) {
-    // no-op if missing; we pad manually
-  }
-  function pad2(h) {
-    h = String(h);
-    return h.length < 2 ? '0' + h : h;
-  }
-  function rndHex2(n) {
-    var s = '';
-    for (var i = 0; i < n; i++) s += pad2(((Math.random() * 256) | 0).toString(16));
-    return s;
-  }
-  function rndMac() {
-    var p = [];
-    for (var i = 0; i < 6; i++) p.push(pad2(((Math.random() * 256) | 0).toString(16)));
-    return p.join(':');
-  }
-  var fp = {
-    androidId: rndHex2(8),
+    androidId: randHex(8),
     board: 'goldfish_arm64',
     brand: 'google',
     cpuAbi: 'arm64-v8a',
-    cpuId: rndHex2(8),
+    cpuId: randHex(8),
     device: 'emu64a',
     diskInfo: '8GB',
     display: 'sdk_gphone64_arm64',
-    etheMac: rndMac(),
-    fingerprint:
-      'google/sdk_gphone64_arm64/emu64a:14/UE1A.230829.036/11228894:user/release-keys',
-    gatewayMac: rndMac(),
+    etheMac: randMac(),
+    fingerprint: 'google/sdk_gphone64_arm64/emu64a:14/UE1A.230829.036/11228894:user/release-keys',
+    gatewayMac: randMac(),
     hardware: 'ranchu',
     host: 'abfarm',
     manufacturer: 'Google',
     ramSize: '4GB',
     romSize: '8GB',
-    serialNumber: rndHex2(8),
+    serialNumber: randHex(8),
     tags: 'release-keys',
     verId: '',
-    wifiMac: rndMac(),
+    wifiMac: randMac()
   };
-  var r = await portalCall('v3/snToken', fp, { baseFields: false });
-  if (!r.ok) return r;
-  var snToken = String((r.data && r.data.snToken) || '').trim();
-  if (!snToken) {
-    return { ok: false, code: 'snToken_failed', message: 'sin snToken' };
-  }
-  var snVal = String((r.data && r.data.sn) || '')
-    .trim()
-    .toLowerCase();
-  if (!snVal) snVal = md5Hex(snToken + CFG.snTokenSalt);
-  STATE.sn = snVal;
-  return activate(snToken);
 }
 
-async function activate(snToken) {
-  var r = await portalCall(
-    'v8/active',
-    {
-      snToken: snToken || '',
+async function portal(path, bean, baseFields = true) {
+  await rateTurn();
+  const c = config();
+  const body = Object.assign(
+    {},
+    baseFields ? { portalCode: PORTAL_CODE, userId: session?.userId || '', userToken: session?.userToken || '' } : {},
+    bean || {},
+    deviceDict()
+  );
+  const wire = encryptBody(JSON.stringify(body));
+  let lastError = 'No se pudo conectar con los hosts configurados';
+  const hosts = preferredHost ? [preferredHost, ...c.hosts.filter(h => h !== preferredHost)] : c.hosts;
+
+  for (const host of hosts) {
+    try {
+      const opts = {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          apk: c.appId,
+          apkVer: API_VERSION,
+          spkgVer: SPKG_VERSION,
+          'User-Agent': 'okhttp/3.12.12'
+        },
+        body: wire
+      };
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        opts.signal = AbortSignal.timeout(6500);
+      }
+      const response = await fetch(`${c.scheme}://${host}/api/portalCore/${path}`, opts);
+      if (!response.ok) {
+        lastError = `HTTP ${response.status}`;
+        continue;
+      }
+      const json = await response.json();
+      const code = String(json.returnCode ?? '');
+      if (code && code !== '0') throw new Error(String(json.errorMessage || json.msg || `Portal ${code}`));
+      preferredHost = host;
+      let data = json.data;
+      if (typeof data === 'string' && data) {
+        try {
+          data = JSON.parse(decryptBlob(data));
+        } catch (_) {}
+      }
+      return data && typeof data === 'object' ? data : json;
+    } catch (e) {
+      lastError = String(e && e.message || e);
+      if (timeoutError(e)) break;
+    }
+  }
+  throw new Error(`${path}: ${lastError}`);
+}
+
+async function ensureSession() {
+  if (session && session.userToken) return;
+  if (sessionPromise) return sessionPromise;
+
+  sessionPromise = (async () => {
+    if (typeof CryptoJS === 'undefined') {
+      throw new Error('El runtime no ha cargado CryptoJS; revisa que index.js incluya la palabra CryptoJS.');
+    }
+    const tokenResponse = await portal('v3/snToken', hardwareFingerprint(), false);
+    const snToken = String(tokenResponse.snToken || '');
+    if (!snToken) throw new Error('El servicio no devolvió snToken');
+    const sn = String(tokenResponse.sn || md5(snToken + SN_SALT)).toLowerCase();
+    session = { sn, userId: '', userToken: '', jwtToken: '' };
+    const active = await portal('v8/active', {
+      snToken,
       authVersion: '',
       authCode: '',
       preCode: '',
-      macAddr: CFG.fixedMac,
+      macAddr: FIXED_MAC,
       reserve1: '',
       openNum: 4,
       channel: 'default',
       matadata: '',
-      signdata: '',
-    },
-    { baseFields: false }
-  );
-  if (!r.ok) return r;
-  var ut = String((r.data && r.data.userToken) || '').trim();
-  if (!ut) {
-    return { ok: false, code: 'active_sin_token', message: 'sin userToken' };
+      signdata: ''
+    }, false);
+    if (!active.userToken) {
+      session = null;
+      throw new Error('La activación no devolvió userToken');
+    }
+    session.userId = String(active.userId || '');
+    session.userToken = String(active.userToken || '');
+    session.jwtToken = String(active.jwtToken || '');
+  })();
+
+  try {
+    await sessionPromise;
+  } finally {
+    sessionPromise = null;
   }
-  STATE.userId = String((r.data && r.data.userId) || '');
-  STATE.userToken = ut;
-  STATE.jwtToken = String((r.data && r.data.jwtToken) || '');
-  if (r.data && r.data.sn) STATE.sn = String(r.data.sn);
-  return { ok: true };
 }
 
-async function login(email, password) {
-  email = String(email || '').trim();
-  password = String(password || '');
-  if (!email || !password) {
-    return { ok: false, code: 'auth', message: 'email y password requeridos' };
+async function api(path, bean) {
+  const ttl = CACHE_TTL[path] || 0;
+  if (!ttl) {
+    await ensureSession();
+    return portal(path, bean, true);
   }
-  // Como Dart/Kino: primero dispositivo anónimo (sn), luego v8/login SIN baseFields
-  var anon = await ensureAnonymous();
-  if (!anon.ok) {
-    log('anon antes de login:', anon.code, anon.message);
-    // seguir: a veces el portal acepta login con sn vacío
-  }
-  var passHash = md5Hex(password + CFG.passwordSalt);
-  var bean = {
-    accountType: '2',
-    userName: email,
-    password: passHash,
-    type: '1',
-    macAddr: CFG.fixedMac,
-    areaCode: '',
-    verificationCode: '',
-    verificationToken: '',
-    matadata: '',
-    signdata: '',
-    channel: 'default',
-  };
-  var r = await portalCall('v8/login', bean, {
-    baseFields: false,
-    sn: STATE.sn || '',
+  return cached(cacheKey(path, bean), ttl, async () => {
+    await ensureSession();
+    return portal(path, bean, true);
   });
-  if (!r.ok) {
-    return {
-      ok: false,
-      code: r.code || 'login',
-      message: r.message || 'login falló',
-    };
+}
+
+function listFrom(o, keys) {
+  for (const k of keys) if (o && Array.isArray(o[k])) return o[k];
+  if (o && o.data && typeof o.data === 'object' && o.data !== o) return listFrom(o.data, keys);
+  if (o && o.result && typeof o.result === 'object' && o.result !== o) return listFrom(o.result, keys);
+  return [];
+}
+
+function flattenItems(data, forcedType) {
+  if (!data || typeof data !== 'object') return [];
+  if (!Array.isArray(data) && data.data && typeof data.data === 'object' && !Array.isArray(data.assetList) && !Array.isArray(data.columnList)) {
+    const nested = flattenItems(data.data, forcedType);
+    if (nested.length) return nested;
   }
-  var ut = String((r.data && r.data.userToken) || '').trim();
-  if (!ut) {
-    return { ok: false, code: 'login_sin_token', message: 'login sin userToken' };
+  if (!Array.isArray(data) && data.result && typeof data.result === 'object') {
+    const nested = flattenItems(data.result, forcedType);
+    if (nested.length) return nested;
   }
-  STATE.userId = String((r.data && r.data.userId) || STATE.userId || '');
-  STATE.userToken = ut;
-  STATE.jwtToken = String((r.data && r.data.jwtToken) || STATE.jwtToken || '');
-  if (r.data && r.data.sn) STATE.sn = String(r.data.sn);
-  STATE.email = email;
-  STATE.password = password;
-  log('login OK userId=', STATE.userId ? 'sí' : 'no', 'sn=', STATE.sn ? 'sí' : 'no');
-  return { ok: true };
-}
-
-async function ensureSession() {
-  if (STATE.userToken) return { ok: true };
-  if (STATE.email && STATE.password) {
-    var lr = await login(STATE.email, STATE.password);
-    if (lr.ok) return lr;
+  if (Array.isArray(data)) {
+    return data.filter(x => x && typeof x === 'object').map(x => normalizeItem(x, forcedType));
   }
-  return ensureAnonymous();
+  for (const key of ['assetList', 'itemList', 'contentList', 'movieList', 'programList', 'list', 'results', 'items']) {
+    if (Array.isArray(data[key])) {
+      return data[key].filter(x => x && typeof x === 'object').map(x => normalizeItem(x, forcedType));
+    }
+  }
+  const groups = listFrom(data, ['searchItemList', 'recommendList', 'columnList', 'homeColumnList', 'rowList', 'columns', 'childColumnList', 'nextColumnList']);
+  const out = [];
+  for (const g of groups) {
+    if (!g || typeof g !== 'object') continue;
+    out.push(...flattenItems(g, forcedType));
+  }
+  return out;
 }
 
-// ─── Catálogo ──────────────────────────────────────────────────────────────
-function categoryName(raw) {
-  var s = String(raw || '').trim();
-  if (!s) return 'Sin nombre';
-  return s;
-}
+function normalizeItem(raw, forcedType) {
+  const images = Array.isArray(raw.posterList || raw.posters || raw.imageList) ? (raw.posterList || raw.posters || raw.imageList) : [];
+  let poster = raw.poster || raw.posterUrl || raw.pic || raw.cover || raw.image || '';
+  let backdrop = raw.backdrop || raw.backdropUrl || raw.background || '';
+  for (const img of images) {
+    if (!img || typeof img !== 'object') continue;
+    const kind = String(img.fileType || img.type || '').toLowerCase();
+    const url = String(img.fileUrl || img.url || img.picUrl || '');
+    if (!url) continue;
+    if (!poster && ['icon', 'h_poster', 'v_poster', 'cover', 'thumb'].includes(kind)) poster = url;
+    if (!backdrop && kind === 'poster') backdrop = url;
+    if (!poster) poster = url;
+  }
+  const programType = String(raw.programType || raw.contentType || raw.type || raw.mediaType || 'movie').toLowerCase();
+  const explicitMovie = ['movie', 'film', '1', 'cinema', 'feature'].includes(programType);
+  let type = forcedType || (!explicitMovie && ['teleplay', 'series', 'variety', '0'].includes(programType) ? 'series' : 'movie');
+  if (type === 'movies') type = 'movie';
+  if (type === 'animation') type = 'anime';
 
-function isAdult(name) {
-  var n = String(name || '').toLowerCase();
-  return (
-    n.indexOf('adult') >= 0 ||
-    n.indexOf('+18') >= 0 ||
-    n.indexOf('xxx') >= 0 ||
-    n.indexOf('erotic') >= 0
-  );
-}
+  const name = String(raw.name || raw.viewPoint || raw.alias || raw.title || raw.contentName || raw.programName || raw.assetName || raw.contentId || raw.id || raw.assetId || raw.programId || 'Sin título');
+  const release = String(raw.releaseTime || raw.year || raw.releaseDate || raw.publishTime || raw.firstAirDate || '');
+  const genres = raw.genres || raw.genreList || raw.categoryList || raw.categoryNameList || raw.categoryName || raw.genre || raw.tags || [];
 
-async function fetchCategories(force) {
-  if (!force && STATE.categoriesCache) return { ok: true, data: STATE.categoriesCache };
-  var s = await ensureSession();
-  if (!s.ok) return s;
-
-  var r = await portalCall('v6/nextColumns', {
-    columnCode: CFG.liveRoot,
-    pageNum: 1,
-    pageSize: 200,
+  const item = Object.assign({}, raw, {
+    id: String(raw.contentId || raw.id || raw.assetId || raw.programId || raw.videoId || ''),
+    contentId: String(raw.contentId || raw.id || raw.assetId || raw.programId || raw.videoId || ''),
+    title: name,
+    name,
+    type,
+    media_type: type,
+    year: /^\d{4}/.test(release) ? release.slice(0, 4) : release,
+    poster,
+    image: poster,
+    backdrop,
+    background: backdrop,
+    description: String(raw.description || raw.desc || raw.introduction || raw.intro || raw.summary || raw.plot || raw.contentDesc || raw.programDesc || raw.assetDesc || raw.brief || ''),
+    overview: String(raw.description || raw.desc || raw.introduction || raw.intro || raw.summary || raw.plot || raw.contentDesc || raw.programDesc || raw.assetDesc || raw.brief || ''),
+    genres: Array.isArray(genres)
+      ? genres.map(g => (typeof g === 'object' ? String(g.name || g.title || '') : String(g))).filter(Boolean)
+      : String(genres || '').split(/[,|;]/).map(x => x.trim()).filter(Boolean),
+    programType: type === 'series' ? 'series' : type === 'anime' ? (programType || 'anime') : 'movie'
   });
-  var out = [];
-  if (r.ok && r.data) {
-    var list = r.data.recommendList || r.data.columnList || r.data.list || [];
-    if (Array.isArray(list)) {
-      for (var i = 0; i < list.length; i++) {
-        var c = list[i];
-        if (!c || typeof c !== 'object') continue;
-        var id = parseInt(c.columnId != null ? c.columnId : c.id, 10);
-        if (isNaN(id)) continue;
-        var name = categoryName(c.name);
-        out.push({ id: id, name: name, adult: isAdult(name) });
+
+  if (raw.score != null && item.rating == null) item.rating = Number(raw.score) || null;
+  if (item.id) {
+    itemKinds.set(item.id, item.type);
+    limitMap(itemKinds, MAX_MAP);
+  }
+  return item;
+}
+
+function rowName(row, fallback) {
+  return String(row.name || row.columnName || row.title || row.recommendName || fallback);
+}
+
+function normalizeRows(data, fallback, forcedType) {
+  if (data && data.data && typeof data.data === 'object' && !Array.isArray(data.data)) data = data.data;
+  // Kino/Xuper: getNextColumns devuelve recommendList[{ name, assetList, columnId?, recommendCode? }]
+  let rows = [];
+  if (data && typeof data === 'object' && Array.isArray(data.recommendList)) rows = data.recommendList;
+  if (!rows.length) {
+    rows = listFrom(data, ['columnList', 'homeColumnList', 'rowList', 'list', 'columns', 'childColumnList', 'nextColumnList', 'columnInfoList']);
+  }
+  if (!rows.length && data && typeof data === 'object' && Array.isArray(data.assetList)) {
+    const items = flattenItems(data, forcedType);
+    return items.length ? [{ id: String(data.columnId || data.recommendCode || 'root'), code: String(data.columnCode || data.recommendCode || ''), title: rowName(data, fallback), name: rowName(data, fallback), items }] : [];
+  }
+  if (!rows.length) {
+    const items = flattenItems(data, forcedType);
+    return items.length ? [{ id: String(data.columnId || 'root'), code: String(data.columnCode || ''), title: fallback, name: fallback, items }] : [];
+  }
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || typeof r !== 'object') continue;
+    const title = rowName(r, `${fallback} ${i + 1}`);
+    // Preferir assetList directo (como parseTree de Kino) — suele ser solo preview (~10)
+    let items = [];
+    if (Array.isArray(r.assetList) && r.assetList.length) {
+      items = r.assetList.filter(x => x && typeof x === 'object').map(x => normalizeItem(x, forcedType));
+    } else {
+      items = flattenItems(r, forcedType);
+    }
+    const code = String(r.columnCode || r.recommendCode || r.code || '');
+    const rawCol = r.columnId ?? r.column_id ?? r.sectionId ?? r.recommendId ?? r.id;
+    const shelveId = /^\d+$/.test(String(rawCol || '')) ? String(rawCol) : '';
+    // id para el filtro de la app: preferir columnId numérico (sirve para getShelveData paginado)
+    let id = shelveId || code || `cat_${i}`;
+    if (!items.length && !id && !code) continue;
+    out.push({ id, code, title, name: title, items: unique(items), shelveId });
+  }
+  return out;
+}
+
+function unique(items) {
+  const seen = new Set();
+  return items.filter(it => {
+    const id = String(it.contentId || it.id || it.title);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function categoryKindsFromRows(rows, kind) {
+  for (const row of rows) {
+    if (row.id) {
+      categoryKinds.set(String(row.id), kind);
+      limitMap(categoryKinds, MAX_MAP);
+    }
+    if (row.code) {
+      categoryKinds.set(String(row.code), kind);
+      limitMap(categoryKinds, MAX_MAP);
+    }
+    for (const item of row.items || []) {
+      const id = String(item.contentId || item.id || '');
+      if (id) {
+        itemKinds.set(id, kind === 'movies' ? 'movie' : kind === 'series' ? 'series' : 'anime');
+        limitMap(itemKinds, MAX_MAP);
       }
     }
   }
-  var hasAll = out.some(function (c) {
-    return c.id === CFG.allCategoryId;
-  });
-  if (!hasAll) {
-    out.unshift({ id: CFG.allCategoryId, name: 'Todos', adult: false });
-  }
-  if (!out.length) {
-    out.push({ id: CFG.allCategoryId, name: 'Todos', adult: false });
-  }
-  STATE.categoriesCache = out;
-  return { ok: true, data: out };
 }
 
-async function fetchChannels(columnId, force) {
-  columnId = columnId || CFG.allCategoryId;
-  if (!force && STATE.channelsCache[columnId]) {
-    return { ok: true, data: STATE.channelsCache[columnId] };
-  }
-  var s = await ensureSession();
-  if (!s.ok) return s;
+function kindLabel(kind) {
+  return kind === 'series' ? 'Series' : kind === 'anime' ? 'Animación' : 'Películas';
+}
 
-  var all = [];
-  var page = 1;
-  var maxPages = 6;
-  var pageSize = 500;
-  while (page <= maxPages) {
-    var r = await portalCall('v6/getLiveData', {
-      columnId: columnId,
-      pageNum: page,
-      pageSize: pageSize,
-      type: '1',
-    });
-    if (!r.ok) {
-      if (page === 1) return r;
-      break;
+/** Normaliza el tipo que manda la UI (movie/series/anime/movies/all) */
+function resolveKind(raw) {
+  const s = String(raw || '').toLowerCase();
+  if (s.includes('anime') || s.includes('anim')) return 'anime';
+  if (s.includes('series') || s === '0' || s === 'tv') return 'series';
+  if (s.includes('all')) return 'all';
+  if (s.includes('movie') || s === '1' || s === 'film') return 'movies';
+  return 'movies';
+}
+
+/** Limita filas e ítems del Home para no saturar la app */
+const HOME_MAX_ROWS_PER_KIND = 4;
+const HOME_MAX_ITEMS_PER_ROW = 12;
+
+function trimHomeRows(rows) {
+  return (rows || [])
+    .slice(0, HOME_MAX_ROWS_PER_KIND)
+    .map(r => Object.assign({}, r, {
+      items: unique(r.items || []).slice(0, HOME_MAX_ITEMS_PER_ROW)
+    }))
+    .filter(r => (r.items && r.items.length) || r.id || r.code);
+}
+
+async function homeRows(kind) {
+  const code = HOME[kind] || HOME.movies;
+  const forcedType = kind === 'series' ? 'series' : kind === 'anime' ? 'anime' : 'movie';
+  return cached('homeRows:' + kind, CACHE_TTL.getHome, async () => {
+    // 1) getHome (rápido). Solo si timeout → no insistir en cadena larga.
+    try {
+      const data = await api('getHome', { homePageCode: code, version: '' });
+      const rows = normalizeRows(data, kindLabel(kind), forcedType);
+      if (rows.length) {
+        categoryKindsFromRows(rows, kind);
+        return trimHomeRows(rows);
+      }
+    } catch (e) {
+      if (timeoutError(e)) return [];
     }
-    var list =
-      (r.data && (r.data.liveList || r.data.list || r.data.channelList)) || [];
-    if (!Array.isArray(list) || !list.length) break;
-    for (var i = 0; i < list.length; i++) {
-      var ch = list[i];
-      if (!ch || typeof ch !== 'object') continue;
-      var code = String(ch.channelCode || ch.code || ch.liveCode || '').trim();
-      if (!code) continue;
-      var name = String(ch.name || ch.channelName || code).trim();
-      var number = parseInt(ch.channelNumber || ch.number || 0, 10) || 0;
-      var logo = ch.logo || ch.posterUrl || ch.icon || null;
-      all.push({
-        code: code,
-        name: name,
-        number: number,
-        logo: logo,
-        adult: isAdult(name) || ch.adult === true,
-        provider: 'xuper',
+    // 2) Un solo fallback ligero (pageSize 8). Sin tercer intento en cold path.
+    try {
+      const data = await api('getNextColumns', { columnCode: code, pageNum: 1, pageSize: 8, version: '' });
+      const rows = normalizeRows(data, kindLabel(kind), forcedType);
+      if (rows.length) {
+        categoryKindsFromRows(rows, kind);
+        return trimHomeRows(rows);
+      }
+    } catch (e) {
+      if (timeoutError(e)) return [];
+    }
+    // 3) Último recurso: una página de la raíz (solo si los anteriores no dieron filas)
+    try {
+      const rootId = ROOT[kind] || ROOT.movies;
+      const data = await api('v3/getShelveData', {
+        columnId: rootId,
+        columnType: '2',
+        pageNum: 1,
+        pageSize: HOME_MAX_ITEMS_PER_ROW,
+        encryptVersion: 0
       });
-    }
-    if (list.length < pageSize) break;
-    page++;
-  }
-  // dedupe by code
-  var seen = {};
-  var uniq = [];
-  for (var j = 0; j < all.length; j++) {
-    if (seen[all[j].code]) continue;
-    seen[all[j].code] = true;
-    uniq.push(all[j]);
-  }
-  STATE.channelsCache[columnId] = uniq;
-  return { ok: true, data: uniq };
+      const items = unique(flattenItems(data, forcedType)).slice(0, HOME_MAX_ITEMS_PER_ROW);
+      if (items.length) return [{ id: rootId, code, title: kindLabel(kind), name: kindLabel(kind), items }];
+    } catch (_) {}
+    return [];
+  });
 }
 
-// ─── Resolve stream ────────────────────────────────────────────────────────
-function extractTokenFromAuthBase(authBase) {
-  if (!authBase) return '';
-  var m = String(authBase).match(/[?&]token=([0-9a-fA-F]{32})/);
-  return m ? m[1] : '';
+async function featured() {
+  return cached('featured-items', CACHE_TTL['v3/getRecommends'], async () => {
+    try {
+      // Solo 3 bloques featured (antes 6) → menos red y menos ítems
+      const data = await api('v3/getRecommends', {
+        recommendCodeArr: Array.from({ length: 3 }, (_, i) => `masnew_featured${String(i + 1).padStart(2, '0')}`)
+      });
+      const items = unique(flattenItems(data)).slice(0, 10);
+      if (items.length) return items;
+    } catch (_) {}
+    // Solo reutiliza caché ya cargada; no dispara homeRows extra
+    const cachedMovies = responseCache.get('homeRows:movies')?.value || [];
+    const cachedSeries = responseCache.get('homeRows:series')?.value || [];
+    return unique([
+      ...cachedMovies.flatMap(r => r.items || []),
+      ...cachedSeries.flatMap(r => r.items || [])
+    ]).slice(0, 10);
+  });
 }
 
-async function resolveChannel(channelCode) {
-  var s = await ensureSession();
-  if (!s.ok) return s;
-  if (!STATE.email) {
-    // Live suele exigir cuenta
-    log('sin cuenta: intentando igual (puede fallar)');
-  }
+function isAnime(item) {
+  const text = `${item.type || ''} ${item.programType || ''} ${item.name || ''} ${item.category || ''} ${item.columnName || ''}`.toLowerCase();
+  return /anime|animaci|donghua|masnew_anime/.test(text);
+}
 
-  var play = await portalCall('v4/startPlayLive', {
-    channelCode: channelCode,
-    columnId: 0,
-    type: '1',
-  });
-  if (!play.ok) return play;
+function itemType(item) {
+  return item.type === 'anime' || isAnime(item)
+    ? 'anime'
+    : item.type === 'series' || item.programType === 'series' || item.programType === 'teleplay' || item.programType === '0'
+      ? 'series'
+      : 'movie';
+}
 
-  var data = play.data || {};
-  var liveAddressList = data.liveAddressList || data.addressList || [];
-  var license = '';
-  var playCode = channelCode;
-  if (Array.isArray(liveAddressList) && liveAddressList.length) {
-    var first = liveAddressList[0];
-    if (typeof first === 'object') {
-      license = String(first.license || first.licence || first.key || '');
-      playCode = String(first.playCode || first.code || channelCode);
+async function _getNews() {
+  // News más corto en Home (el resto se ve en Descubrir / búsqueda)
+  const limit = Math.max(1, Math.min(8, parseInt(config().newsLimit, 10) || 8));
+  const items = await featured();
+  return unique(items).slice(0, limit).map((it, i) => Object.assign({}, it, { section: 'novedades', news: true, newsRank: i + 1 }));
+}
+
+async function _getHome() {
+  // Paraleliza los 3 tipos (el rateQueue sigue serializando el portal).
+  // Misma forma de filas/ítems; menos tiempo de pared en cold start.
+  const kinds = ['movies', 'series', 'anime'];
+  const results = await Promise.all(kinds.map(k => homeRows(k).catch(() => [])));
+  const rows = [];
+  for (let i = 0; i < kinds.length; i++) {
+    const kind = kinds[i];
+    for (const row of results[i] || []) {
+      rows.push(Object.assign({}, row, {
+        type: 'row',
+        categoryType: kind === 'movies' ? 'movie' : kind,
+        category: row.title,
+        // Home sigue en banner horizontal
+        imageStyle: 'backdrop'
+      }));
     }
   }
-  if (!license && data.license) license = String(data.license);
-  if (!license) {
-    return {
-      ok: false,
-      code: 'live_no_license',
-      message: 'Sin licencia para ' + channelCode,
-    };
-  }
-
-  var slb = await portalCall('v14/getSlbInfo', {
-    hasPay: '0',
-    userIdentity: '1',
-    type: 'merge',
-    appVer: CFG.apkVersion,
-    lang: 'es',
-    encMediaSupported: 1,
-    liveCodeList: [channelCode],
-    appParams: '',
-    reserve1: CFG.fixedMac,
-  });
-  if (!slb.ok) return slb;
-
-  var cdns = [];
-  var slbData = slb.data || {};
-  var cflList =
-    slbData.cflList ||
-    slbData.cdnList ||
-    slbData.liveCdnList ||
-    slbData.list ||
-    [];
-  if (!Array.isArray(cflList) && typeof cflList === 'object') {
-    cflList = Object.keys(cflList).map(function (k) {
-      return cflList[k];
+  const news = await getNews().catch(() => []);
+  if (news.length) {
+    rows.unshift({
+      id: 'novedades',
+      code: 'novedades',
+      title: 'Novedades',
+      name: 'Novedades',
+      type: 'hero',
+      imageStyle: 'backdrop',
+      items: news.slice(0, 8)
     });
   }
-  if (Array.isArray(cflList)) {
-    for (var i = 0; i < cflList.length; i++) {
-      var item = cflList[i];
-      if (!item || typeof item !== 'object') continue;
-      var tag = String(item.tag || item.type || '').toLowerCase();
-      if (tag && tag !== 'live' && tag !== 'cfl') continue;
-      var host = String(item.cflHost || item.host || item.domain || '').trim();
-      var auth = String(item.authBase || item.auth || item.url || '').trim();
-      if (host && auth) cdns.push({ cflHost: host, authBase: auth });
-    }
-  }
-  // fallback: campos planos
-  if (!cdns.length && slbData.cflHost && slbData.authBase) {
-    cdns.push({
-      cflHost: String(slbData.cflHost),
-      authBase: String(slbData.authBase),
-    });
-  }
-  if (!cdns.length) {
-    return {
-      ok: false,
-      code: 'live_no_cfl_cdn',
-      message: 'No hay CDN cfl para ' + channelCode,
-    };
-  }
-
-  var cdn = cdns[0];
-  var token = extractTokenFromAuthBase(cdn.authBase);
-  if (!token) {
-    return {
-      ok: false,
-      code: 'live_no_cfl_token',
-      message: 'authBase sin token= para ' + channelCode,
-    };
-  }
-
-  var moment = Date.now();
-  var sign = signO3(token, moment);
-  // Headers típicos Magis HLS
-  var headers = {
-    'Content-Auth':
-      'token=' + token + ';sign=' + sign + ';start_moment=' + moment,
-    'Content-License': license,
-    'User-Agent': 'okhttp/3.12.12',
-  };
-
-  var playlistUrl =
-    'http://' + cdn.cflHost + '/live/' + playCode + '.m3u8?token=' + token;
-
-  return {
-    ok: true,
-    data: {
-      url: playlistUrl,
-      playCode: playCode,
-      license: license,
-      token: token,
-      cflHost: cdn.cflHost,
-      authBase: cdn.authBase,
-      headers: headers,
-      // el player debe regenerar Content-Auth por segmento con sign_o3
-      // si no, la reproducción se corta; para eso existe LiveHlsProxy en Dart
-    },
-  };
+  return rows;
 }
 
-// ─── API del addon (Nuvio / lolplus) ────────────────────────────────────────
+async function getCatalogs() {
+  return [
+    { id: 'peliculas', title: 'Películas', name: 'Películas', type: 'movie', kinds: ['movie'], extra: { kind: 'movies' } },
+    { id: 'series', title: 'Series', name: 'Series', type: 'series', kinds: ['series'], extra: { kind: 'series' } },
+    { id: 'animacion', title: 'Animación', name: 'Animación', type: 'anime', kinds: ['anime'], extra: { kind: 'anime' } }
+  ];
+}
+
+async function getCatalog(catalogId, options) {
+  const id = String(catalogId || '').toLowerCase();
+  const opts = options && typeof options === 'object' ? options : {};
+  const kind = id.includes('anime') || id.includes('anim') ? 'anime' : id.includes('series') ? 'series' : 'movies';
+  return getDiscover(Object.assign({}, opts, { kind }));
+}
+
+function rememberCategoryRow(row, kind) {
+  const key = String(row.id || row.code || '');
+  if (!key) return;
+  const entry = {
+    items: unique(row.items || []),
+    kind,
+    title: row.title || row.name || key,
+    code: row.code || '',
+    // columnId numérico para paginar con getShelveData (lista completa)
+    shelveId: row.shelveId || (/^\d+$/.test(key) ? key : '')
+  };
+  categoryItemsCache.set(key, entry);
+  if (row.code && String(row.code) !== key) categoryItemsCache.set(String(row.code), entry);
+  if (entry.shelveId && entry.shelveId !== key) categoryItemsCache.set(entry.shelveId, entry);
+  limitMap(categoryItemsCache, MAX_MAP);
+}
+
+async function categoryRows(kind) {
+  const code = HOME[kind] || HOME.movies;
+  const forcedType = kind === 'series' ? 'series' : kind === 'anime' ? 'anime' : 'movie';
+  // Solo necesitamos nombres/IDs de categoría para filtros → pageSize bajo (menos payload/CPU)
+  try {
+    const data = await api('getNextColumns', { columnCode: code, pageNum: 1, pageSize: 12, version: '' });
+    const rows = normalizeRows(data, kindLabel(kind), forcedType);
+    const usable = rows.filter(r => (r.items && r.items.length) || r.id || r.code);
+    if (usable.length) {
+      categoryKindsFromRows(usable, kind);
+      for (const row of usable) rememberCategoryRow(row, kind);
+      return usable;
+    }
+  } catch (_) {}
+  const rows = await homeRows(kind).catch(() => []);
+  categoryKindsFromRows(rows, kind);
+  for (const row of rows) rememberCategoryRow(row, kind);
+  return rows.filter(r => r.id || r.code || (r.items && r.items.length));
+}
 
 /**
- * La app NO llama a setConfig del plugin.
- * Guarda la config del usuario en:
- *   globalThis.__nuvioConfig.current
- *   globalThis.__nuvioConfig['magis-live']
- * Solo leemos email y password. Hosts/clave fijos.
+ * La UI envía filters = { type: 'movie'|'series'|'anime', category: columnId }
+ * Sin opción "Todas las categorías": cada opción es una categoría real.
+ * Al cambiar type se recargan solo las categorías de ese tipo.
  */
-function applyNuvioConfig() {
-  var cfg = null;
+async function _getDiscoverFilters(filters) {
+  const opts = filters && typeof filters === 'object' ? filters : {};
+  const kind = resolveKind(opts.type || opts.kind || opts.filter || 'movie');
+  const types = [
+    { id: 'movie', label: 'Películas' },
+    { id: 'series', label: 'Series' },
+    { id: 'anime', label: 'Animación' }
+  ];
+  const kinds = kind === 'all' ? ['movies', 'series', 'anime'] : [kind === 'movies' ? 'movies' : kind];
+  const rowsByKind = await Promise.all(kinds.map(k => categoryRows(k).catch(() => [])));
+  const options = [];
+  const seen = new Set();
+  for (let i = 0; i < kinds.length; i++) {
+    for (const row of rowsByKind[i]) {
+      // XPPC: solo categorías con columnId numérico (getShelveData no acepta codes)
+      const id = String(row.shelveId || (/^\d+$/.test(String(row.id || '')) ? row.id : ''));
+      if (!id || !/^\d+$/.test(id) || seen.has(id)) continue;
+      seen.add(id);
+      categoryKinds.set(id, kinds[i]);
+      limitMap(categoryKinds, MAX_MAP);
+      if (row.code) {
+        categoryKinds.set(String(row.code), kinds[i]);
+        limitMap(categoryKinds, MAX_MAP);
+      }
+      options.push({
+        id,
+        label: row.title || row.name || kindLabel(kinds[i]),
+        columnId: id,
+        columnCode: String(row.code || ''),
+        type: kinds[i] === 'movies' ? 'movie' : kinds[i]
+      });
+    }
+  }
+  if (!options.length) {
+    for (const k of kinds) {
+      const rootId = String(ROOT[k] || ROOT.movies);
+      if (seen.has(rootId)) continue;
+      seen.add(rootId);
+      categoryKinds.set(rootId, k);
+      options.push({
+        id: rootId,
+        label: kindLabel(k),
+        columnId: rootId,
+        columnCode: HOME[k] || '',
+        type: k === 'movies' ? 'movie' : k
+      });
+    }
+  }
+  return [
+    { id: 'type', name: 'Tipo', label: 'Tipo', type: 'select', options: types },
+    { id: 'category', name: 'Categoría', label: 'Categoría', type: 'select', options }
+  ];
+}
+
+/**
+ * Lista completa paginada (XPPC):
+ *   v3/getShelveData { columnId, columnType:'2', pageNum, pageSize, encryptVersion:0 }
+ * El assetList del árbol (~10) es solo preview; aquí va la lista real.
+ */
+async function fetchShelvePage(columnId, forcedType, page, pageSize) {
+  const idNum = Number(columnId);
+  const idStr = String(columnId);
+  if (!Number.isFinite(idNum) || idNum <= 0) {
+    return { items: [], page, hasMore: false, total: 0 };
+  }
+
+  // Solo 2 beans (el portal acepta num o string). Evita 6 intentos rate-limited en frío.
+  const beans = [
+    { columnId: idNum, columnType: '2', pageNum: page, pageSize, encryptVersion: 0 },
+    { columnId: idStr, columnType: '2', pageNum: page, pageSize, encryptVersion: 0 }
+  ];
+
+  for (const bean of beans) {
+    try {
+      const data = await api('v3/getShelveData', bean);
+      let items = [];
+      if (Array.isArray(data.assetList)) {
+        items = data.assetList
+          .filter(x => x && typeof x === 'object')
+          .map(x => normalizeItem(x, forcedType));
+      }
+      if (!items.length) items = flattenItems(data, forcedType);
+      items = unique(items).map(it => {
+        const t = forcedType || itemType(it);
+        if (it.id) {
+          itemKinds.set(it.id, t);
+          limitMap(itemKinds, MAX_MAP);
+        }
+        // Descubrir: posters verticales (no banner)
+        const poster = it.poster || it.image || it.backdrop || '';
+        return Object.assign({}, it, {
+          type: t,
+          media_type: t,
+          poster,
+          image: poster,
+          imageStyle: 'poster'
+        });
+      });
+      const totalRaw = data.assetListTotalSize ?? data.listTotalSize ?? data.totalSize ?? data.total ?? data.count;
+      const pageItems = items.length > pageSize ? items.slice(0, pageSize) : items;
+      const total = totalRaw != null
+        ? Number(totalRaw)
+        : (page - 1) * pageSize + pageItems.length + (pageItems.length >= 10 ? pageSize : 0);
+      const hasMore = totalRaw != null
+        ? page * pageSize < Number(totalRaw)
+        : pageItems.length >= 10;
+      if (pageItems.length || (totalRaw != null && Number(totalRaw) > 0)) {
+        return { items: pageItems, page, hasMore, total: Number(total) || pageItems.length };
+      }
+    } catch (_) {}
+  }
+
+  // Sin cascada getNextColumns → nested fetchShelvePage (era muy pesada y duplicaba trabajo)
+  return { items: [], page, hasMore: false, total: 0 };
+}
+
+async function _getDiscover(options) {
+  const opts = options && typeof options === 'object' ? options : {};
+  // Paginación servidor: v3/getShelveData (igual extracción XPPC). Optimizado: ROOT directo si no hay categoría.
+  const kind = resolveKind(opts.type || opts.kind || 'movie');
+  const page = Math.max(1, parseInt(opts.page, 10) || 1);
+  const pageSize = Math.min(40, Math.max(10, parseInt(opts.pageSize, 10) || 20));
+  const rootKey = kind === 'anime' ? 'anime' : kind === 'series' ? 'series' : 'movies';
+  const forcedType = rootKey === 'series' ? 'series' : rootKey === 'anime' ? 'anime' : 'movie';
+
+  let selected = String(
+    opts.columnId ||
+    opts.categoryId ||
+    opts.category ||
+    opts.genre ||
+    opts.filter ||
+    ''
+  ).trim();
+
+  if (
+    !selected ||
+    selected === 'all' ||
+    selected === 'Todas las categorías' ||
+    selected === 'undefined' ||
+    selected === 'null' ||
+    selected === 'type' ||
+    selected === 'movie' ||
+    selected === 'series' ||
+    selected === 'anime' ||
+    selected === 'movies'
+  ) {
+    selected = '';
+  }
+
+  let shelveId = '';
+  if (selected && /^\d+$/.test(selected)) {
+    shelveId = selected;
+  } else if (selected) {
+    // Resolver nombre/code → columnId solo si el usuario eligió categoría (no en cada página "todas")
+    const rows = await categoryRows(rootKey).catch(() => []);
+    const found = rows.find(r =>
+      String(r.id) === selected ||
+      String(r.code) === selected ||
+      String(r.shelveId || '') === selected ||
+      r.title === selected ||
+      r.name === selected
+    );
+    if (found) {
+      shelveId = String(found.shelveId || (/^\d+$/.test(String(found.id || '')) ? found.id : ''));
+    }
+    const cached = categoryItemsCache.get(selected);
+    if (!shelveId && cached && cached.shelveId) shelveId = String(cached.shelveId);
+  }
+
+  // Sin categoría: ROOT fijo (evita getNextColumns extra en cada visita a Descubrir)
+  if (!shelveId || !/^\d+$/.test(shelveId)) {
+    shelveId = String(ROOT[rootKey] || ROOT.movies);
+  }
+
+  const pageResult = await fetchShelvePage(shelveId, forcedType, page, pageSize);
+  if (pageResult.items.length || pageResult.hasMore) {
+    pageResult.items = (pageResult.items || []).map(it => {
+      const poster = it.poster || it.image || '';
+      return Object.assign({}, it, {
+        poster,
+        image: poster,
+        imageStyle: 'poster'
+      });
+    });
+    return pageResult;
+  }
+
+  const rootId = String(ROOT[rootKey] || ROOT.movies);
+  if (shelveId !== rootId) {
+    const rootPage = await fetchShelvePage(rootId, forcedType, page, pageSize);
+    if (rootPage.items.length || rootPage.hasMore) {
+      rootPage.items = (rootPage.items || []).map(it => {
+        const poster = it.poster || it.image || '';
+        return Object.assign({}, it, { poster, image: poster, imageStyle: 'poster' });
+      });
+      return rootPage;
+    }
+  }
+
+  return { items: [], page, hasMore: false, total: 0 };
+}
+
+async function search(query, options) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const opts = options && typeof options === 'object' ? options : {};
+  const page = Math.max(1, parseInt(opts.page, 10) || 1);
+  const requested = String(opts.type || '').toLowerCase();
+  return cached('search:' + q.toLowerCase() + ':' + requested + ':' + page, 25e3, async () => {
+    const find = async type => unique(flattenItems(await api('v3/searchByName', {
+      value: q,
+      type,
+      columnId: '',
+      filter: '',
+      pageNum: page,
+      pageSize: 20
+    })));
+    const remember = (items, kind) => items.map(it => {
+      const id = String(it.contentId || it.id || '');
+      if (id) {
+        itemKinds.set(id, kind);
+        limitMap(itemKinds, MAX_MAP);
+      }
+      return Object.assign(it, { type: kind, media_type: kind });
+    });
+    if (requested === 'anime' || requested === 'animacion' || requested === 'animation') {
+      try {
+        return remember((await find('0')).filter(it => isAnime(it)), 'anime');
+      } catch (_) {
+        return [];
+      }
+    }
+    if (requested === 'movie' || requested === 'movies') {
+      try {
+        return remember(await find('1'), 'movie');
+      } catch (_) {
+        return [];
+      }
+    }
+    if (requested === 'series') {
+      try {
+        return remember(await find('0'), 'series');
+      } catch (_) {
+        return [];
+      }
+    }
+    const results = await Promise.all([find('1').catch(() => []), find('0').catch(() => [])]);
+    return unique([...results[0], ...results[1]]).map(it => {
+      const kind = itemType(it);
+      const id = String(it.contentId || it.id || '');
+      if (id) {
+        itemKinds.set(id, kind);
+        limitMap(itemKinds, MAX_MAP);
+      }
+      return Object.assign(it, { type: kind, media_type: kind });
+    });
+  });
+}
+
+function unwrapDetail(response) {
+  let data = response;
+  for (let i = 0; i < 5 && data && typeof data === 'object'; i++) {
+    if (data.assetData && typeof data.assetData === 'object') {
+      data = data.assetData;
+      continue;
+    }
+    if (data.item && typeof data.item === 'object') {
+      data = data.item;
+      continue;
+    }
+    if (data.result && typeof data.result === 'object') {
+      data = data.result;
+      continue;
+    }
+    if (data.data && typeof data.data === 'object' && !data.contentId && !data.name && !data.title && !data.programType) {
+      data = data.data;
+      continue;
+    }
+    break;
+  }
+  return data && typeof data === 'object' ? data : {};
+}
+
+function episodeRows(data, seriesId, defaultSeason, seasonPortalId) {
+  const raw = listFrom(data, ['simpleProgramList', 'episodeList', 'episodes', 'programList', 'movieList', 'assetList']);
+  const seasonPortal = String(seasonPortalId || seriesId || '');
+  return raw.map((ep, j) => {
+    const e = normalizeItem(ep);
+    const number = Number(ep.seriesNumber || ep.episodeNum || ep.episodeNo || ep.episode || ep.number || j + 1) || j + 1;
+    const id = String(ep.contentId || ep.id || ep.movieId || ep.assetId || '');
+    if (!id) return null;
+    // Forzar la temporada que estamos cargando (no la que diga el portal a veces mal)
+    const season = Number(defaultSeason || ep.seasonNumber || ep.seasonNum || ep.season || 1) || 1;
+    if (seriesId) {
+      episodeContentIds.set(`${seriesId}:${season}:${number}`, id);
+      episodeParent.set(id, String(seriesId));
+      if (seasonPortal) {
+        episodeSeasonId.set(id, seasonPortal);
+        seasonContentIds.set(`${seriesId}:${season}`, seasonPortal);
+        episodeContentIds.set(`${seasonPortal}:${season}:${number}`, id);
+      }
+      limitMap(episodeContentIds, MAX_MAP);
+      limitMap(episodeParent, MAX_MAP);
+      limitMap(episodeSeasonId, MAX_MAP);
+      limitMap(seasonContentIds, MAX_MAP);
+    }
+    return {
+      number,
+      episode: number,
+      id,
+      contentId: id,
+      title: String(ep.name || ep.viewPoint || ep.alias || ep.title || `Capítulo ${number}`),
+      name: String(ep.name || ep.viewPoint || ep.alias || ep.title || `Capítulo ${number}`),
+      overview: String(ep.description || ep.desc || ep.introduction || ''),
+      description: String(ep.description || ep.desc || ep.introduction || ''),
+      still: String(ep.poster || ep.posterUrl || e.poster || e.backdrop || ''),
+      poster: String(ep.poster || ep.posterUrl || e.poster || ''),
+      season,
+      seriesContentId: String(seriesId || ''),
+      seasonContentId: seasonPortal
+    };
+  }).filter(Boolean);
+}
+
+function parseSeasonFromName(name) {
+  const m = String(name || '').match(/(?:temporada|season|temp\.?|\bT|\bS)\s*(\d+)/i);
+  return m ? Number(m[1]) : 0;
+}
+
+function rememberEpisodeMap(parentId, seasons) {
+  for (const s of seasons || []) {
+    const sn = Number(s.number || s.season || 1) || 1;
+    for (const ep of s.episodes || []) {
+      const en = Number(ep.number || ep.episode || 0);
+      const eid = String(ep.id || ep.contentId || '');
+      if (!en || !eid) continue;
+      episodeContentIds.set(`${parentId}:${sn}:${en}`, eid);
+      episodeParent.set(eid, String(parentId));
+    }
+  }
+  limitMap(episodeContentIds, MAX_MAP);
+  limitMap(episodeParent, MAX_MAP);
+}
+
+
+// ─── TMDB opcional (estilo Kino: enriquecimiento, nunca requisito) ───────────
+const TMDB_BASE = 'https://api.themoviedb.org/3';
+const TMDB_IMG = 'https://image.tmdb.org/t/p';
+const tmdbCache = new Map();
+
+function tmdbKey() {
   try {
-    var root = globalThis.__nuvioConfig || (typeof __nuvioConfig !== 'undefined' ? __nuvioConfig : null);
-    if (root) {
-      cfg = root.current || root['magis-live'] || root['magis_live'] || null;
-      // a veces es un mapa por id; tomar el primer objeto con email
-      if (!cfg || typeof cfg !== 'object') {
-        for (var k in root) {
-          if (!Object.prototype.hasOwnProperty.call(root, k)) continue;
-          var v = root[k];
-          if (v && typeof v === 'object' && (v.email || v.password)) {
-            cfg = v;
-            break;
+    const k = String(config().tmdbApiKey || '').trim();
+    return k || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function tmdbGet(path, params) {
+  const key = tmdbKey();
+  if (!key) return null;
+  const q = Object.assign({ api_key: key, language: 'es-MX' }, params || {});
+  const qs = Object.keys(q).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(String(q[k]))).join('&');
+  const url = TMDB_BASE + path + '?' + qs;
+  const ck = 'tmdb:' + path + ':' + qs;
+  const hit = tmdbCache.get(ck);
+  if (hit && hit.expires > Date.now()) return hit.value;
+  try {
+    const opts = { method: 'GET', headers: { Accept: 'application/json' } };
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      opts.signal = AbortSignal.timeout(6000);
+    }
+    const res = await fetch(url, opts);
+    if (!res.ok) return null;
+    const json = await res.json();
+    tmdbCache.set(ck, { value: json, expires: Date.now() + 30 * 60e3 });
+    limitMap(tmdbCache, 80);
+    return json;
+  } catch (_) {
+    return null;
+  }
+}
+
+function tmdbStill(path) {
+  if (!path || path === 'null') return '';
+  return TMDB_IMG + '/w300' + path;
+}
+
+/**
+ * Rellena still/poster de capítulos Magis con stills TMDB (misma S/E).
+ * No cambia estructura ni IDs; solo campos de imagen vacíos o débiles.
+ * Si no hay clave TMDB o falla la red → no-op.
+ */
+async function enrichEpisodeStillsFromTmdb(item) {
+  if (!item || !Array.isArray(item.seasons) || !item.seasons.length) return item;
+  if (!tmdbKey()) return item;
+  try {
+    const imdb = String(
+      (item.details && (item.details.keyWords || item.details.imdbId || item.details.imdb)) ||
+      item.imdb || item.imdbId || ''
+    ).trim();
+    let tvId = 0;
+    if (/^tt\d{7,}$/i.test(imdb)) {
+      const find = await tmdbGet('/find/' + imdb, { external_source: 'imdb_id' });
+      const tv = find && Array.isArray(find.tv_results) && find.tv_results[0];
+      if (tv && tv.id) tvId = Number(tv.id) || 0;
+    }
+    if (!tvId) {
+      const title = String(item.title || item.name || '').replace(/\s*[Tt]emp(orada)?\.?\s*\d+.*$/, '').trim();
+      if (title.length < 2) return item;
+      const search = await tmdbGet('/search/tv', { query: title });
+      const hit = search && Array.isArray(search.results) && search.results[0];
+      if (hit && hit.id) tvId = Number(hit.id) || 0;
+    }
+    if (!tvId) return item;
+
+    // Solo temporadas presentes en Magis (máx 6 para no saturar)
+    const seasons = item.seasons.slice(0, 6);
+    await Promise.all(seasons.map(async (s) => {
+      const sn = Number(s.number || s.season || 1) || 1;
+      const body = await tmdbGet('/tv/' + tvId + '/season/' + sn, {});
+      if (!body || !Array.isArray(body.episodes)) return;
+      const byNum = new Map();
+      for (const e of body.episodes) {
+        const n = Number(e.episode_number);
+        if (n) byNum.set(n, e);
+      }
+      for (const ep of s.episodes || []) {
+        const n = Number(ep.number || ep.episode || 0);
+        const te = byNum.get(n);
+        if (!te) continue;
+        const still = tmdbStill(te.still_path);
+        if (!still) continue;
+        // Solo si Magis no traía still decente
+        if (!ep.still || ep.still === ep.poster) ep.still = still;
+        if (!ep.poster) ep.poster = still;
+        if (!ep.image) ep.image = still;
+      }
+    }));
+
+    // Reflejar episodes de la temporada actual
+    if (Array.isArray(item.episodes) && item.seasons.length) {
+      const cur = item.seasons.find(s => Number(s.number) === Number((item.episodes[0] && item.episodes[0].season) || 1)) || item.seasons[0];
+      if (cur && cur.episodes && cur.episodes.length) item.episodes = cur.episodes;
+    }
+  } catch (_) {}
+  return item;
+}
+
+async function _getMeta(id, options) {
+  const opts = options && typeof options === 'object' ? options : (typeof options === 'string' ? { type: options } : {});
+  const contentId = String(id && typeof id === 'object' ? (id.contentId || id.id || id.assetId || id.programId) : id || '').trim();
+  if (!contentId) return null;
+  const seed = id && typeof id === 'object' ? normalizeItem(id) : null;
+  let knownType = String((seed && seed.type) || itemKinds.get(contentId) || '');
+  const explicit = String(opts.type || '').toLowerCase();
+  let preferred = explicit || (knownType === 'series' || knownType === 'anime' ? '0' : knownType === 'movie' ? '1' : '');
+  if (preferred === 'movie' || preferred === 'movies') preferred = '1';
+  if (preferred === 'series' || preferred === 'anime' || preferred === 'tv') preferred = '0';
+  const types = preferred ? [preferred, preferred === '0' ? '1' : '0'] : ['1', '0'];
+
+  return cached('meta:' + contentId + ':' + (preferred || 'auto'), CACHE_TTL['v4/getItemData'], async () => {
+    let data = {}, fetchedType = preferred || '1';
+    for (const t of types) {
+      try {
+        const response = await api('v4/getItemData', {
+          contentId,
+          type: t,
+          sortType: '0',
+          language: 'en',
+          macAddr: FIXED_MAC
+        });
+        const candidate = unwrapDetail(response);
+        const hasIdentity = !!(candidate.contentId || candidate.id || candidate.name || candidate.title || candidate.viewPoint || candidate.assetName);
+        const hasDetail = !!(candidate.description || candidate.introduction || candidate.desc || candidate.posterList || candidate.simpleProgramList || candidate.sameSeasonSeriesList);
+        if (hasIdentity || hasDetail) {
+          data = candidate;
+          fetchedType = t;
+          if (t === '0' || candidate.simpleProgramList || candidate.sameSeasonSeriesList) break;
+        }
+      } catch (_) {}
+    }
+
+    const merged = Object.assign({}, seed || {}, data);
+    merged.contentId = String(data.contentId || data.id || contentId);
+    if (!(data.name || data.title || data.viewPoint || data.alias) && seed) {
+      merged.name = seed.title || seed.name;
+    }
+    const detailTitleForSeason = String(data.name || data.viewPoint || data.alias || data.title || '');
+    const defaultSeason = Number(data.seasonNumber || data.season || parseSeasonFromName(detailTitleForSeason) || 1) || 1;
+    // Esta ficha puede ser YA una temporada concreta: su contentId es el de esa temporada
+    const simple = episodeRows(data, contentId, defaultSeason, contentId);
+    seasonContentIds.set(`${contentId}:${defaultSeason}`, contentId);
+    const ptype = String(data.programType || data.contentType || data.type || '').toLowerCase();
+    const isSeries = ['teleplay', 'series', 'variety', '0', 'tv'].includes(ptype) || fetchedType === '0' || simple.length > 1 || Array.isArray(data.sameSeasonSeriesList);
+    const type = isSeries ? (knownType === 'anime' ? 'anime' : 'series') : 'movie';
+    const item = normalizeItem(merged, type);
+    item.type = type;
+    item.media_type = type;
+    item.programType = isSeries ? 'series' : 'movie';
+    item.id = String(data.contentId || data.id || contentId);
+    item.contentId = item.id;
+    item.title = String(data.name || data.viewPoint || data.alias || data.title || data.contentName || data.programName || item.title || contentId);
+    item.name = item.title;
+    item.description = String(data.description || data.introduction || data.desc || data.contentDesc || data.programDesc || item.description || '');
+    item.overview = item.description;
+    item.details = data;
+
+    const bySeason = new Map();
+    for (const ep of simple) {
+      const n = Number(ep.season || 1);
+      if (!bySeason.has(n)) bySeason.set(n, []);
+      bySeason.get(n).push(ep);
+    }
+
+    const siblings = Array.isArray(data.sameSeasonSeriesList) ? data.sameSeasonSeriesList : [];
+    const currentSeason = Number(data.seasonNumber || data.season || parseSeasonFromName(item.title) || defaultSeason || 1) || 1;
+
+    if (isSeries && !bySeason.has(currentSeason) && simple.length) {
+      bySeason.set(currentSeason, simple);
+    }
+
+    const seasons = [];
+    for (const [number, episodes] of Array.from(bySeason.entries()).sort((a, b) => a[0] - b[0])) {
+      seasons.push({
+        number,
+        season: number,
+        name: `Temporada ${number}`,
+        title: `Temporada ${number}`,
+        episodes: episodes.sort((a, b) => a.number - b.number),
+        // contentId de esta temporada en el portal (= ficha actual si es su temporada)
+        contentId: contentId
+      });
+      seasonContentIds.set(`${contentId}:${number}`, contentId);
+    }
+
+    // Cada temporada suele ser otro contentId (sameSeasonSeriesList)
+    if (isSeries && siblings.length) {
+      const links = [];
+      const seen = new Set([item.id]);
+      for (const sibling of siblings) {
+        const sid = String(sibling.contentId || sibling.id || '').trim();
+        if (!sid || seen.has(sid)) continue;
+        seen.add(sid);
+        let sn = Number(sibling.seasonNumber || sibling.season || parseSeasonFromName(sibling.name || sibling.title || '') || 0) || 0;
+        links.push({
+          id: sid,
+          number: sn,
+          name: String(sibling.name || sibling.viewPoint || sibling.title || (sn ? `Temporada ${sn}` : 'Temporada')),
+          poster: sibling.poster || sibling.posterUrl || ''
+        });
+      }
+      // Si el portal no numera bien, asignar 1..N ordenando por nombre/id
+      const usedNums = new Set(seasons.map(s => Number(s.number)));
+      if (usedNums.has(currentSeason) === false && simple.length) usedNums.add(currentSeason);
+      let auto = 1;
+      for (const link of links) {
+        if (!link.number || usedNums.has(link.number)) {
+          while (usedNums.has(auto)) auto++;
+          link.number = auto;
+        }
+        usedNums.add(link.number);
+        auto = link.number + 1;
+      }
+
+      for (const link of links.slice(0, 8)) {
+        try {
+          const sr = await api('v4/getItemData', {
+            contentId: link.id,
+            type: '0',
+            sortType: '0',
+            language: 'en',
+            macAddr: FIXED_MAC
+          });
+          const sd = unwrapDetail(sr);
+          const seasonNum = link.number || Number(sd.seasonNumber || sd.season || parseSeasonFromName(link.name) || seasons.length + 1) || 1;
+          // Episodios de ESTA temporada: indexados bajo item.id y bajo link.id (contentId de la temporada)
+          let eps = episodeRows(sd, item.id, seasonNum, link.id);
+          eps = eps.map(ep => Object.assign({}, ep, {
+            season: seasonNum,
+            seriesContentId: item.id,
+            seasonContentId: link.id
+          }));
+          seasonContentIds.set(`${item.id}:${seasonNum}`, link.id);
+          seasonContentIds.set(`${link.id}:${seasonNum}`, link.id);
+          for (const ep of eps) {
+            const eid = String(ep.id);
+            episodeContentIds.set(`${item.id}:${seasonNum}:${Number(ep.number)}`, eid);
+            episodeContentIds.set(`${link.id}:${seasonNum}:${Number(ep.number)}`, eid);
+            episodeParent.set(eid, String(item.id));
+            episodeSeasonId.set(eid, link.id);
           }
+          limitMap(episodeContentIds, MAX_MAP);
+          limitMap(seasonContentIds, MAX_MAP);
+          const existing = seasons.find(x => x.number === seasonNum);
+          if (existing) {
+            if (!existing.episodes.length) {
+              existing.episodes = eps;
+              existing.contentId = link.id;
+            }
+          } else {
+            seasons.push({
+              number: seasonNum,
+              season: seasonNum,
+              name: link.name || `Temporada ${seasonNum}`,
+              title: link.name || `Temporada ${seasonNum}`,
+              episodes: eps,
+              contentId: link.id
+            });
+          }
+        } catch (_) {}
+      }
+      if (!seasons.length) {
+        for (const link of links) {
+          seasons.push({
+            number: link.number || seasons.length + 1,
+            season: link.number || seasons.length + 1,
+            name: link.name,
+            episodes: [],
+            contentId: link.id
+          });
+        }
+      }
+    }
+
+    if (isSeries && !seasons.length) {
+      seasons.push({
+        number: currentSeason,
+        season: currentSeason,
+        name: `Temporada ${currentSeason}`,
+        episodes: simple
+      });
+    }
+
+    // Garantizar Temporada 1: si solo hay T2+ y un sibling sin número, promover el de menor número o el actual si es 1
+    if (isSeries && seasons.length && !seasons.some(s => Number(s.number) === 1)) {
+      // Renumerar la temporada con más episodios "base" o la de menor número a 1 si currentSeason era mal etiquetada
+      seasons.sort((a, b) => Number(a.number) - Number(b.number));
+      const first = seasons[0];
+      if (first && Number(first.number) !== 1) {
+        const oldN = Number(first.number);
+        first.number = 1;
+        first.season = 1;
+        first.name = first.name && /temporada/i.test(first.name) ? 'Temporada 1' : (first.name || 'Temporada 1');
+        first.title = first.name;
+        for (const ep of first.episodes || []) {
+          ep.season = 1;
+          episodeContentIds.set(`${item.id}:1:${Number(ep.number)}`, String(ep.id || ep.contentId));
+          if (oldN) episodeContentIds.set(`${item.id}:${oldN}:${Number(ep.number)}`, String(ep.id || ep.contentId));
+        }
+      }
+    }
+
+    seasons.sort((a, b) => Number(a.number) - Number(b.number));
+    // Re-indexar todas las temporadas bajo item.id para que getStreams(seriesId, S, E) siempre resuelva
+    for (const s of seasons) {
+      const sn = Number(s.number) || 1;
+      for (const ep of s.episodes || []) {
+        const eid = String(ep.id || ep.contentId || '');
+        if (!eid) continue;
+        ep.season = sn;
+        ep.seriesContentId = item.id;
+        episodeContentIds.set(`${item.id}:${sn}:${Number(ep.number)}`, eid);
+        episodeParent.set(eid, String(item.id));
+      }
+    }
+    limitMap(episodeContentIds, MAX_MAP);
+
+    item.seasons = seasons;
+    item.episodes = seasons.length ? (seasons.find(s => Number(s.number) === currentSeason) || seasons[0]).episodes : simple;
+    item.seasonSiblings = siblings;
+    item.genres = item.genres || [];
+    rememberEpisodeMap(item.id, seasons);
+    if (item.id) {
+      itemKinds.set(item.id, type);
+      limitMap(itemKinds, MAX_MAP);
+    }
+    // Post-proceso opcional: stills TMDB solo para capítulos que Magis ya listó
+    try {
+      await enrichEpisodeStillsFromTmdb(item);
+    } catch (_) {}
+    return item;
+  });
+}
+
+function normalizeSubLang(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (!s || s === 'und' || s === 'unknown' || s === 'null') return { code: 'es', label: 'Español' };
+  if (/^(es|spa|spanish|español|castellano)/.test(s)) return { code: 'es', label: 'Español' };
+  if (/^(en|eng|english|inglés|ingles)/.test(s)) return { code: 'en', label: 'English' };
+  if (/^(pt|por|portuguese|portugu)/.test(s)) return { code: 'pt', label: 'Português' };
+  if (/^(fr|fre|french|franc)/.test(s)) return { code: 'fr', label: 'Français' };
+  if (/^(de|ger|german|alem)/.test(s)) return { code: 'de', label: 'Deutsch' };
+  if (/^(it|ita|italian)/.test(s)) return { code: 'it', label: 'Italiano' };
+  if (/^(zh|chi|chinese|mandarin)/.test(s)) return { code: 'zh', label: '中文' };
+  if (/^(ja|jpn|japanese|japon)/.test(s)) return { code: 'ja', label: '日本語' };
+  if (/^(ko|kor|korean|corean)/.test(s)) return { code: 'ko', label: '한국어' };
+  if (s.length <= 3) return { code: s, label: s.toUpperCase() };
+  return { code: s.slice(0, 2), label: String(raw) };
+}
+
+/**
+ * Subtítulos estilo Kino/Xuper:
+ *   play.episodeList[0].subtitleList[].file[0].url + language + fileType
+ * Más cualquier otra lista conocida. Devuelve TODOS los disponibles con URL.
+ */
+function extractSubtitles(baseUrl, ...sources) {
+  const out = [];
+  const seen = new Set();
+  const base = String(baseUrl || '').replace(/\/$/, '');
+
+  const absolutize = (url) => {
+    let u = String(url || '').trim();
+    if (!u) return '';
+    if (/^https?:\/\//i.test(u)) return u;
+    if (u.startsWith('//')) return 'https:' + u;
+    if (!base) return u;
+    if (u.startsWith('/')) return base + u;
+    return base + '/' + u;
+  };
+
+  const push = (url, lang, label, format) => {
+    const u = absolutize(url);
+    if (!u || seen.has(u)) return;
+    if (!/^https?:\/\//i.test(u)) return;
+    seen.add(u);
+    let fmt = String(format || '').toLowerCase().replace(/^\./, '');
+    const lower = u.toLowerCase();
+    if (!fmt || fmt === 'text' || fmt === 'file') {
+      if (lower.includes('.vtt')) fmt = 'vtt';
+      else if (lower.includes('.srt')) fmt = 'srt';
+      else if (lower.includes('.ass') || lower.includes('.ssa')) fmt = 'ass';
+      else fmt = 'srt';
+    }
+    const nl = normalizeSubLang(lang || label);
+    out.push({
+      url: u,
+      lang: nl.code,
+      language: nl.code,
+      label: label && String(label).length > 1 && !/^und$/i.test(String(label)) ? String(label) : nl.label,
+      format: fmt,
+      type: fmt
+    });
+  };
+
+  // Camino principal Kino: subtitleList[].file[0].url
+  const readKinoSubs = (node) => {
+    if (!node || typeof node !== 'object') return;
+    const episodes = Array.isArray(node.episodeList) ? node.episodeList : [node];
+    for (const ep of episodes) {
+      if (!ep || typeof ep !== 'object') continue;
+      const list = ep.subtitleList || ep.subtitles || node.subtitleList;
+      if (!Array.isArray(list)) continue;
+      for (const sub of list) {
+        if (!sub || typeof sub !== 'object') continue;
+        const files = Array.isArray(sub.file) ? sub.file : (sub.file ? [sub.file] : []);
+        const file = files[0] || sub;
+        const url = (file && (file.url || file.fileUrl || file.src)) || sub.url || sub.fileUrl || '';
+        if (!url) continue;
+        const lang = sub.language || sub.lang || sub.languageCode || file.language || '';
+        const format = (file && (file.fileType || file.format || file.type)) || sub.format || 'srt';
+        push(url, lang, lang || 'Subtítulo', format);
+      }
+    }
+  };
+
+  for (const src of sources) {
+    if (!src || typeof src !== 'object') continue;
+    readKinoSubs(src);
+
+    const lists = [
+      src.subtitleList, src.subtitles, src.subs, src.captionList, src.captions,
+      src.lanList, src.languageList, src.subtitleInfoList, src.subTitleList,
+      src.trackList, src.tracks, src.subtitleTrackList, src.subList
+    ];
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue;
+      for (const s of list) {
+        if (!s) continue;
+        if (typeof s === 'string') {
+          push(s, 'es', 'Español');
+          continue;
+        }
+        if (typeof s !== 'object') continue;
+        // file[] anidado (formato portal)
+        if (Array.isArray(s.file) && s.file[0]) {
+          const f = s.file[0];
+          const url = f.url || f.fileUrl || f.src || '';
+          if (url) {
+            push(url, s.language || s.lang || f.language, s.language || s.name || 'Subtítulo', f.fileType || f.format || 'srt');
+            continue;
+          }
+        }
+        const url = s.url || s.fileUrl || s.src || s.subtitleUrl || s.subUrl ||
+          s.path || s.address || s.downloadUrl || s.playUrl || s.uri || '';
+        const lang = s.lang || s.language || s.languageCode || s.code || s.lan || s.iso || '';
+        const label = s.label || s.name || s.title || s.languageName || lang;
+        const format = s.format || s.type || s.fileType || s.ext || '';
+        const kind = String(s.trackType || s.mediaType || s.streamType || '').toLowerCase();
+        if (kind && (kind.includes('audio') || kind === 'video')) continue;
+        if (url) push(url, lang, label, format);
+      }
+    }
+    if (src.subtitleUrl) push(src.subtitleUrl, src.subtitleLang || src.lang || 'es', src.subtitleName || 'Español');
+    if (src.subUrl) push(src.subUrl, 'es', 'Español');
+  }
+  return out;
+}
+
+/** Devuelve { playableId, seasonPortalId } para el capítulo pedido */
+async function resolveEpisodePlayable(seriesContentId, season, episode) {
+  const sn = Number(season || 1) || 1;
+  const en = Number(episode || 1) || 1;
+
+  const tryKeys = (parent) => {
+    const pid = episodeContentIds.get(`${parent}:${sn}:${en}`);
+    if (!pid) return null;
+    const seasonPortalId = episodeSeasonId.get(pid) ||
+      seasonContentIds.get(`${parent}:${sn}`) ||
+      parent;
+    return { playableId: pid, seasonPortalId: String(seasonPortalId) };
+  };
+
+  let hit = tryKeys(seriesContentId);
+  if (hit) return hit;
+
+  // Buscar otros padres indexados
+  for (const key of episodeContentIds.keys()) {
+    if (!key.endsWith(`:${sn}:${en}`)) continue;
+    const parent = key.split(':')[0];
+    hit = tryKeys(parent);
+    if (hit) {
+      // Alias bajo el id que mandó la app
+      episodeContentIds.set(`${seriesContentId}:${sn}:${en}`, hit.playableId);
+      if (hit.seasonPortalId) {
+        seasonContentIds.set(`${seriesContentId}:${sn}`, hit.seasonPortalId);
+        episodeSeasonId.set(hit.playableId, hit.seasonPortalId);
+      }
+      return hit;
+    }
+  }
+
+  try {
+    // Bypassear caché pública si hace falta datos frescos de otra temporada
+    const meta = await _getMeta(seriesContentId, { type: 'series' });
+    hit = tryKeys(seriesContentId) || tryKeys(meta && meta.id) || tryKeys(meta && meta.contentId);
+    if (hit) return hit;
+
+    if (meta && Array.isArray(meta.seasons)) {
+      let foundSeason = meta.seasons.find(x => Number(x.number) === sn);
+      if (foundSeason && Array.isArray(foundSeason.episodes)) {
+        const foundEp = foundSeason.episodes.find(x => Number(x.number) === en || Number(x.episode) === en);
+        if (foundEp && (foundEp.id || foundEp.contentId)) {
+          const playableId = String(foundEp.id || foundEp.contentId);
+          const seasonPortalId = String(
+            foundSeason.contentId ||
+            foundEp.seasonContentId ||
+            seasonContentIds.get(`${seriesContentId}:${sn}`) ||
+            seriesContentId
+          );
+          episodeContentIds.set(`${seriesContentId}:${sn}:${en}`, playableId);
+          episodeParent.set(playableId, String(seriesContentId));
+          episodeSeasonId.set(playableId, seasonPortalId);
+          seasonContentIds.set(`${seriesContentId}:${sn}`, seasonPortalId);
+          return { playableId, seasonPortalId };
+        }
+      }
+
+      // Cargar la temporada pedida por sibling bajo demanda
+      let sibling = (meta.seasonSiblings || []).find(s => {
+        const n = Number(s.seasonNumber || s.season || parseSeasonFromName(s.name || s.title || '') || 0);
+        return n === sn;
+      });
+      // Si no hay número, usar el de seasons[contentId]
+      if (!sibling && foundSeason && foundSeason.contentId) {
+        sibling = { contentId: foundSeason.contentId, id: foundSeason.contentId, seasonNumber: sn };
+      }
+      if (!sibling) {
+        const byIdx = (meta.seasonSiblings || [])[sn - 1];
+        if (byIdx) sibling = byIdx;
+      }
+      if (sibling) {
+        const sid = String(sibling.contentId || sibling.id || '');
+        if (sid) {
+          try {
+            const sr = await api('v4/getItemData', {
+              contentId: sid,
+              type: '0',
+              sortType: '0',
+              language: 'en',
+              macAddr: FIXED_MAC
+            });
+            const sd = unwrapDetail(sr);
+            const eps = episodeRows(sd, seriesContentId, sn, sid);
+            const byNum = eps.find(e => Number(e.number) === en);
+            if (byNum) {
+              return {
+                playableId: String(byNum.id),
+                seasonPortalId: sid
+              };
+            }
+          } catch (_) {}
         }
       }
     }
   } catch (_) {}
 
-  if (!cfg || typeof cfg !== 'object') return false;
-
-  var email = String(cfg.email || cfg.user || cfg.usuario || cfg.correo || '').trim();
-  var password = String(cfg.password || cfg.pass || cfg.contraseña || cfg.contrasena || '');
-
-  var changed = false;
-  if (email && email !== STATE.email) {
-    STATE.email = email;
-    changed = true;
-  }
-  if (password && password !== STATE.password) {
-    STATE.password = password;
-    changed = true;
-  }
-  if (changed) {
-    STATE.userToken = '';
-    STATE.userId = '';
-    STATE.categoriesCache = null;
-    STATE.channelsCache = {};
-    log('config leída de __nuvioConfig, email=', STATE.email ? 'sí' : 'no');
-  }
-  return !!(STATE.email && STATE.password);
+  return { playableId: '', seasonPortalId: '' };
 }
 
-/** Compat: si algún runtime llama setConfig del export */
-function setConfig(config) {
-  if (!config || typeof config !== 'object') return;
-  if (config.email) STATE.email = String(config.email).trim();
-  if (config.password) STATE.password = String(config.password);
-  STATE.userToken = '';
-  STATE.userId = '';
-  STATE.categoriesCache = null;
-  STATE.channelsCache = {};
-  log('setConfig export, email=', STATE.email ? 'sí' : 'no');
-}
+async function _getStreams(id, type, season, episode) {
+  const parentId = String(id && typeof id === 'object' ? (id.contentId || id.id || id.assetId) : id || '').trim();
+  if (!parentId) return [];
 
-async function getHome() {
-  try {
-    applyNuvioConfig();
-    if (!STATE.email || !STATE.password) {
-      return [
-        {
-          title: 'Configura tu cuenta',
-          items: [
-            {
-              id: 'magis:config',
-              type: 'channel',
-              name: 'Abre Configuración del repo, escribe email y contraseña, pulsa Guardar y vuelve a Home',
-              poster: null,
-            },
-          ],
-        },
-      ];
+  const itemTypeHint = String(type || (id && id.type) || itemKinds.get(parentId) || 'movie').toLowerCase();
+  const isSeries = ['series', 'anime', 'tv', 'teleplay', '0'].includes(itemTypeHint);
+
+  let playableId = parentId;
+  // Magis espera el contentId de la TEMPORADA (no solo el de la serie genérica)
+  let seriesContentId = '';
+
+  if (isSeries) {
+    const rootId = String((id && id.seriesContentId) || episodeParent.get(parentId) || parentId);
+    // ¿Ya es un contentId de episodio?
+    if (episodeSeasonId.has(parentId) || [...episodeContentIds.values()].includes(parentId)) {
+      playableId = parentId;
+      seriesContentId = episodeSeasonId.get(parentId) || seasonContentIds.get(`${rootId}:${Number(season || 1)}`) || rootId;
+    } else {
+      const resolved = await resolveEpisodePlayable(rootId, season, episode);
+      playableId = resolved.playableId;
+      seriesContentId = resolved.seasonPortalId ||
+        seasonContentIds.get(`${rootId}:${Number(season || 1)}`) ||
+        rootId;
     }
-    var lr = await login(STATE.email, STATE.password);
-    if (!lr.ok) {
-      var detail = [lr.code, lr.message].filter(Boolean).join(' — ');
-      return [
-        {
-          title: 'Error de login',
-          items: [
-            {
-              id: 'magis:error',
-              type: 'channel',
-              name: detail || 'login falló',
-              poster: null,
-              description:
-                'Revisa email/contraseña. Hosts: ' +
-                CFG.hosts.join(', ') +
-                '. Si el portal cambió de clave 3DES, avisa.',
-            },
-          ],
-        },
-      ];
-    }
-    var cats = await fetchCategories(true);
-    if (!cats.ok) {
-      return [
-        {
-          title: 'Error catálogo',
-          items: [
-            {
-              id: 'magis:error',
-              type: 'channel',
-              name: (cats.code || '') + ': ' + (cats.message || ''),
-              poster: null,
-            },
-          ],
-        },
-      ];
-    }
-    var rows = [];
-    // "Todos" primero (limitado)
-    var allCh = await fetchChannels(CFG.allCategoryId, true);
-    if (allCh.ok && allCh.data && allCh.data.length) {
-      rows.push({
-        title: 'Todos los canales',
-        items: allCh.data.slice(0, 80).map(channelToItem),
-      });
-    }
-    for (var i = 0; i < cats.data.length; i++) {
-      var cat = cats.data[i];
-      if (cat.id === CFG.allCategoryId) continue;
-      var ch = await fetchChannels(cat.id, false);
-      if (!ch.ok || !ch.data || !ch.data.length) continue;
-      rows.push({
-        title: cat.name,
-        items: ch.data.slice(0, 40).map(channelToItem),
-      });
-      if (rows.length >= 12) break;
-    }
-    return rows;
-  } catch (e) {
-    log('getHome error', e);
-    return [
-      {
-        title: 'Error',
-        items: [
-          {
-            id: 'magis:error',
-            type: 'channel',
-            name: String(e && e.message ? e.message : e),
-            poster: null,
-          },
-        ],
-      },
-    ];
+    if (!playableId) return [];
   }
-}
 
-function channelToItem(ch) {
-  return {
-    id: 'magis:' + ch.code,
-    type: 'channel',
-    name: ch.name,
-    poster: ch.logo || null,
-    logo: ch.logo || null,
-    description: 'Canal #' + (ch.number || '') + ' · ' + ch.code,
-    genres: ch.adult ? ['Adultos'] : ['Live'],
-  };
-}
+  const play = await api('v10/startPlayVOD', {
+    contentId: playableId,
+    seriesContentId: seriesContentId || '',
+    type: '1',
+    startTime: 0,
+    columnId: 0,
+    authType: ''
+  });
 
-async function search(query) {
-  applyNuvioConfig();
-  query = String(query || '')
-    .trim()
-    .toLowerCase();
-  if (!query) return [];
-  try {
-    if (STATE.email && STATE.password && !STATE.userToken) {
-      await login(STATE.email, STATE.password);
+  let mediaCandidates = [];
+  const episodeList = listFrom(play, ['episodeList']);
+  if (episodeList.length) {
+    const wanted = Number(episode || 0);
+    let selectedEpisode = episodeList.find(ep => Number(ep.seriesNumber || ep.episodeNum || ep.episode || ep.number || 0) === wanted);
+    if (!selectedEpisode && playableId) {
+      selectedEpisode = episodeList.find(ep => String(ep.contentId || ep.id || '') === playableId);
     }
-    var all = await fetchChannels(CFG.allCategoryId, false);
-    if (!all.ok) return [];
-    return all.data
-      .filter(function (ch) {
-        return (
-          ch.name.toLowerCase().indexOf(query) >= 0 ||
-          ch.code.toLowerCase().indexOf(query) >= 0
-        );
-      })
-      .slice(0, 50)
-      .map(channelToItem);
-  } catch (e) {
-    log('search', e);
-    return [];
+    if (!selectedEpisode) selectedEpisode = episodeList[0];
+    for (const group of listFrom(selectedEpisode, ['totalMovieList'])) {
+      mediaCandidates.push(...listFrom(group, ['movieList']));
+    }
   }
-}
+  if (!mediaCandidates.length) mediaCandidates = listFrom(play, ['mediaList', 'movieList']);
+  if (!mediaCandidates.length && play && play.contentId && play.licenseList) mediaCandidates = [play];
+  if (!mediaCandidates.length) return [];
 
-async function getMeta(id) {
-  applyNuvioConfig();
-  id = String(id || '').replace(/^magis:/, '');
-  if (!id || id === 'config' || id === 'error') {
-    return {
-      id: 'magis:' + id,
-      type: 'channel',
-      name: id,
-      description: 'Configura email/password en el repo.',
-    };
-  }
-  try {
-    var all = await fetchChannels(CFG.allCategoryId, false);
-    var ch = null;
-    if (all.ok) {
-      for (var i = 0; i < all.data.length; i++) {
-        if (all.data[i].code === id) {
-          ch = all.data[i];
-          break;
-        }
+  mediaCandidates.sort((a, b) => {
+    const score = m => (String(m.encodeFormat || '').toLowerCase() === 'h264' ? 0 : 2) + (String(m.videoFormat || '').toLowerCase() === 'mp4' ? 0 : 1);
+    return score(a) - score(b);
+  });
+
+  const media = mediaCandidates[0];
+  const licenses = listFrom(media, ['licenseList']);
+  const license = licenses.length ? String(licenses[0].license || '') : '';
+  if (!license) return [];
+
+  const slb = await api('v14/getSlbInfo', {
+    hasPay: '0',
+    userIdentity: '1',
+    type: 'merge',
+    appVer: config().apkVersion,
+    lang: 'es',
+    encMediaSupported: 1,
+    liveCodeList: ['masnew_live'],
+    appParams: '',
+    reserve1: FIXED_MAC,
+    pipFlag: '0'
+  });
+
+  const cdns = listFrom(slb, ['cdn_list']);
+  let chosen = null;
+  for (const cdn of cdns) {
+    if (String(cdn.tag) !== 'vod') continue;
+    for (const u of listFrom(cdn, ['url_list'])) {
+      const url = String(u.url || '');
+      if (String(u.tag) === 'free' && (url.includes('cfl') || String(u.sign_type) === 'cfl')) {
+        chosen = { cdn, u };
+        break;
       }
     }
-    if (!ch) {
-      return {
-        id: 'magis:' + id,
-        type: 'channel',
-        name: id,
-        description: 'Canal live Magis',
-      };
-    }
-    return {
-      id: 'magis:' + ch.code,
-      type: 'channel',
-      name: ch.name,
-      poster: ch.logo,
-      logo: ch.logo,
-      description: 'En vivo · código ' + ch.code,
-      genres: ['Live', 'TV'],
-    };
-  } catch (e) {
-    return { id: 'magis:' + id, type: 'channel', name: id };
+    if (chosen) break;
   }
+  if (!chosen) return [];
+
+  const base = String(chosen.cdn.main_addr || '').replace(/\/$/, '');
+  const ext = String(media.videoFormat || '').toLowerCase() === 'ts' ? 'ts' : 'mp4';
+  const mediaId = String(media.contentId || playableId || parentId);
+  const url = `${base}/vod/${mediaId}_media.${ext}`;
+
+  // Subtítulos con URL absoluta (el player descarga sin headers de auth)
+  const subtitles = extractSubtitles(
+    base,
+    play,
+    media,
+    ...(mediaCandidates || []),
+    ...(episodeList || [])
+  );
+
+  return [{
+    name: 'Magis Service',
+    title: 'Magis Service',
+    url,
+    quality: String(media.definition || media.resolution || 'Auto'),
+    type: ext,
+    mimeType: ext === 'mp4' ? 'video/mp4' : 'video/mp2t',
+    headers: {
+      'Content-Auth': String(chosen.u.url),
+      'Content-License': license,
+      'User-Agent': 'Ranger/4.9.4-17294ac0',
+      App: config().appId,
+      'App-Version': config().apkVersion
+    },
+    language: 'Español',
+    isHls: false,
+    subtitles,
+    subs: subtitles,
+    captions: subtitles
+  }];
 }
 
-async function getStreams(id, type, season, episode) {
-  applyNuvioConfig();
-  id = String(id || '').replace(/^magis:/, '');
-  if (!id || id === 'config' || id === 'error') return [];
-  try {
-    if (STATE.email && STATE.password) {
-      var lr = await login(STATE.email, STATE.password);
-      if (!lr.ok) {
-        log('login en getStreams falló', lr);
-      }
-    }
-    var r = await resolveChannel(id);
-    if (!r.ok) {
-      log('resolve fail', r);
-      return [];
-    }
-    var d = r.data;
-    return [
-      {
-        url: d.url,
-        name: 'Magis Live · ' + id,
-        quality: 'HD',
-        language: 'es',
-        provider: 'magis',
-        isHls: true,
-        headers: d.headers,
-        // behaviorHints estilo Stremio por si el player los usa
-        behaviorHints: {
-          notWebReady: true,
-          proxyHeaders: {
-            request: d.headers,
-          },
-        },
-      },
-    ];
-  } catch (e) {
-    log('getStreams', e);
-    return [];
-  }
-}
-
-async function getDiscover() {
-  return getHome();
-}
-
+// ─── API pública ───────────────────────────────────────────────────────────
 async function getNews() {
-  return [];
+  return cached('public:getNews', 90e3, () => _getNews());
+}
+async function getHome() {
+  return cached('public:getHome', 3 * 60e3, () => _getHome());
+}
+async function getDiscoverFilters(filters) {
+  const opts = filters && typeof filters === 'object' ? filters : {};
+  const type = resolveKind(opts.type || opts.kind || 'movie');
+  // Cache por tipo para que al cambiar Tipo se recarguen categorías
+  return cached('public:getDiscoverFilters:' + type, 8 * 60e3, () => _getDiscoverFilters(opts));
+}
+async function getDiscover(options) {
+  const opts = options && typeof options === 'object' ? options : {};
+  // Clave estable: type + category + page
+  const type = resolveKind(opts.type || opts.kind || 'movie');
+  const cat = String(opts.category || opts.columnId || opts.categoryId || opts.filter || 'all');
+  const page = parseInt(opts.page, 10) || 1;
+  return cached(`public:getDiscover:${type}:${cat}:${page}`, 90e3, () => _getDiscover(opts));
+}
+async function getMeta(id, options) {
+  const keyId = id && typeof id === 'object' ? (id.contentId || id.id || id.assetId || id.programId || JSON.stringify(id)) : String(id || '');
+  const opts = options && typeof options === 'object' ? options : (typeof options === 'string' ? { type: options } : {});
+  return cached('public:getMeta:' + String(keyId) + ':' + JSON.stringify(opts), 4 * 60e3, () => _getMeta(id, opts));
+}
+async function getStreams(id, type, season, episode) {
+  const keyId = id && typeof id === 'object' ? (id.contentId || id.id || id.assetId || JSON.stringify(id)) : String(id || '');
+  const key = ['public:getStreams', keyId, type || '', season || '', episode || ''].join(':');
+  return cached(key, 18e3, () => _getStreams(id, type, season, episode));
 }
 
-// Export CommonJS (lo que espera el runtime de la app)
 module.exports = {
-  setConfig: setConfig,
-  getHome: getHome,
-  getDiscover: getDiscover,
-  search: search,
-  getMeta: getMeta,
-  getStreams: getStreams,
-  getNews: getNews,
+  getNews,
+  getHome,
+  getDiscoverFilters,
+  getDiscover,
+  getCatalog,
+  search,
+  getMeta,
+  getStreams,
+  getCatalogs
 };
