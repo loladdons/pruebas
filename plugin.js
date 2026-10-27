@@ -21,7 +21,7 @@ const DEFAULTS = {
   apkVersion: '49902',
   desKeyHex: 'e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8',
   newsLimit: '12',
-  // Opcional: clave TMDB (solo enriquece stills de capítulos / posters si falta). Sin clave no hace nada.
+  // TMDB: enriquece títulos/overview/stills de capítulos + logo para player
   tmdbApiKey: 'a2d9bbed370d9f678e34006f8750a5a5'
 };
 const API_VERSION = '43404';
@@ -1026,7 +1026,7 @@ function rememberEpisodeMap(parentId, seasons) {
 }
 
 
-// ─── TMDB opcional (estilo Kino: enriquecimiento, nunca requisito) ───────────
+// ─── TMDB (enriquecimiento; nunca bloquea si falla) ─────────────────────────
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_IMG = 'https://image.tmdb.org/t/p';
 const tmdbCache = new Map();
@@ -1034,9 +1034,9 @@ const tmdbCache = new Map();
 function tmdbKey() {
   try {
     const k = String(config().tmdbApiKey || '').trim();
-    return k || '';
+    return k || 'a2d9bbed370d9f678e34006f8750a5a5';
   } catch (_) {
-    return '';
+    return 'a2d9bbed370d9f678e34006f8750a5a5';
   }
 }
 
@@ -1052,80 +1052,204 @@ async function tmdbGet(path, params) {
   try {
     const opts = { method: 'GET', headers: { Accept: 'application/json' } };
     if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-      opts.signal = AbortSignal.timeout(6000);
+      opts.signal = AbortSignal.timeout(7000);
     }
     const res = await fetch(url, opts);
     if (!res.ok) return null;
     const json = await res.json();
-    tmdbCache.set(ck, { value: json, expires: Date.now() + 30 * 60e3 });
-    limitMap(tmdbCache, 80);
+    tmdbCache.set(ck, { value: json, expires: Date.now() + 45 * 60e3 });
+    limitMap(tmdbCache, 100);
     return json;
   } catch (_) {
     return null;
   }
 }
 
-function tmdbStill(path) {
+function tmdbImg(path, size) {
   if (!path || path === 'null') return '';
-  return TMDB_IMG + '/w300' + path;
+  return TMDB_IMG + '/' + (size || 'w300') + path;
+}
+
+function pickLogo(images) {
+  if (!images || !Array.isArray(images.logos) || !images.logos.length) return '';
+  const logos = images.logos.filter(l => l && l.file_path);
+  if (!logos.length) return '';
+  // Preferir español, luego sin idioma, luego inglés, luego cualquiera
+  const rank = (l) => {
+    const lang = String(l.iso_639_1 || '');
+    if (lang === 'es') return 0;
+    if (!lang) return 1;
+    if (lang === 'en') return 2;
+    return 3;
+  };
+  logos.sort((a, b) => rank(a) - rank(b) || (b.vote_average || 0) - (a.vote_average || 0));
+  return tmdbImg(logos[0].file_path, 'w500');
+}
+
+function cleanTitleForSearch(name) {
+  return String(name || '')
+    .replace(/\s*[Tt]emp(orada)?\.?\s*\d+.*$/i, '')
+    .replace(/\s*[Ss]eason\s*\d+.*$/i, '')
+    .replace(/\s*\(\d{4}\)\s*$/, '')
+    .replace(/\s*[-–—]\s*(Latino|Castellano|Español|Sub\w*).*$/i, '')
+    .trim();
+}
+
+async function resolveTmdbId(item, isTv) {
+  const imdb = String(
+    (item.details && (item.details.keyWords || item.details.imdbId || item.details.imdb)) ||
+    item.imdb || item.imdbId || item.keyWords || ''
+  ).trim();
+  if (/^tt\d{7,}$/i.test(imdb)) {
+    const find = await tmdbGet('/find/' + imdb, { external_source: 'imdb_id' });
+    if (isTv) {
+      const tv = find && Array.isArray(find.tv_results) && find.tv_results[0];
+      if (tv && tv.id) return Number(tv.id) || 0;
+    } else {
+      const mov = find && Array.isArray(find.movie_results) && find.movie_results[0];
+      if (mov && mov.id) return Number(mov.id) || 0;
+    }
+  }
+  const title = cleanTitleForSearch(item.title || item.name);
+  if (title.length < 2) return 0;
+  const year = String(item.year || '').slice(0, 4);
+  if (isTv) {
+    const search = await tmdbGet('/search/tv', { query: title });
+    const hit = search && Array.isArray(search.results) && search.results[0];
+    return hit && hit.id ? Number(hit.id) || 0 : 0;
+  }
+  const params = { query: title };
+  if (/^\d{4}$/.test(year)) params.year = year;
+  const search = await tmdbGet('/search/movie', params);
+  const hit = search && Array.isArray(search.results) && search.results[0];
+  return hit && hit.id ? Number(hit.id) || 0 : 0;
 }
 
 /**
- * Rellena still/poster de capítulos Magis con stills TMDB (misma S/E).
- * No cambia estructura ni IDs; solo campos de imagen vacíos o débiles.
- * Si no hay clave TMDB o falla la red → no-op.
+ * Enriquece ficha Magis con TMDB:
+ *  - logo (player / UI)
+ *  - capítulos: título, overview, still, runtime (solo episodios que Magis ya listó)
+ * No cambia IDs ni estructura Magis.
  */
 async function enrichEpisodeStillsFromTmdb(item) {
-  if (!item || !Array.isArray(item.seasons) || !item.seasons.length) return item;
-  if (!tmdbKey()) return item;
+  if (!item) return item;
+  const isSeries = item.type === 'series' || item.type === 'anime' ||
+    (Array.isArray(item.seasons) && item.seasons.length > 0);
   try {
-    const imdb = String(
-      (item.details && (item.details.keyWords || item.details.imdbId || item.details.imdb)) ||
-      item.imdb || item.imdbId || ''
-    ).trim();
-    let tvId = 0;
-    if (/^tt\d{7,}$/i.test(imdb)) {
-      const find = await tmdbGet('/find/' + imdb, { external_source: 'imdb_id' });
-      const tv = find && Array.isArray(find.tv_results) && find.tv_results[0];
-      if (tv && tv.id) tvId = Number(tv.id) || 0;
-    }
-    if (!tvId) {
-      const title = String(item.title || item.name || '').replace(/\s*[Tt]emp(orada)?\.?\s*\d+.*$/, '').trim();
-      if (title.length < 2) return item;
-      const search = await tmdbGet('/search/tv', { query: title });
-      const hit = search && Array.isArray(search.results) && search.results[0];
-      if (hit && hit.id) tvId = Number(hit.id) || 0;
-    }
-    if (!tvId) return item;
+    if (isSeries) {
+      const tvId = await resolveTmdbId(item, true);
+      if (!tvId) return item;
 
-    // Solo temporadas presentes en Magis (máx 6 para no saturar)
-    const seasons = item.seasons.slice(0, 6);
-    await Promise.all(seasons.map(async (s) => {
-      const sn = Number(s.number || s.season || 1) || 1;
-      const body = await tmdbGet('/tv/' + tvId + '/season/' + sn, {});
-      if (!body || !Array.isArray(body.episodes)) return;
-      const byNum = new Map();
-      for (const e of body.episodes) {
-        const n = Number(e.episode_number);
-        if (n) byNum.set(n, e);
+      // Detalle + imágenes en paralelo (logo + overview/backdrop si faltan)
+      const [detail, images] = await Promise.all([
+        tmdbGet('/tv/' + tvId, {}),
+        tmdbGet('/tv/' + tvId + '/images', { include_image_language: 'es,en,null' })
+      ]);
+      const logo = pickLogo(images);
+      if (logo) {
+        item.logo = logo;
+        item.clearlogo = logo;
       }
-      for (const ep of s.episodes || []) {
-        const n = Number(ep.number || ep.episode || 0);
-        const te = byNum.get(n);
-        if (!te) continue;
-        const still = tmdbStill(te.still_path);
-        if (!still) continue;
-        // Solo si Magis no traía still decente
-        if (!ep.still || ep.still === ep.poster) ep.still = still;
-        if (!ep.poster) ep.poster = still;
-        if (!ep.image) ep.image = still;
+      if (detail) {
+        if (!item.overview && detail.overview) {
+          item.overview = String(detail.overview);
+          item.description = item.overview;
+        }
+        if (!item.backdrop && detail.backdrop_path) {
+          item.backdrop = tmdbImg(detail.backdrop_path, 'w1280');
+          item.background = item.backdrop;
+        }
+        if ((!item.poster || !item.poster.length) && detail.poster_path) {
+          item.poster = tmdbImg(detail.poster_path, 'w500');
+          item.image = item.poster;
+        }
+        if (detail.name) {
+          item.tmdbTitle = String(detail.name);
+        }
+        item.tmdbId = tvId;
       }
-    }));
 
-    // Reflejar episodes de la temporada actual
-    if (Array.isArray(item.episodes) && item.seasons.length) {
-      const cur = item.seasons.find(s => Number(s.number) === Number((item.episodes[0] && item.episodes[0].season) || 1)) || item.seasons[0];
-      if (cur && cur.episodes && cur.episodes.length) item.episodes = cur.episodes;
+      if (!Array.isArray(item.seasons) || !item.seasons.length) return item;
+
+      const seasons = item.seasons.slice(0, 8);
+      await Promise.all(seasons.map(async (s) => {
+        const sn = Number(s.number || s.season || 1) || 1;
+        const body = await tmdbGet('/tv/' + tvId + '/season/' + sn, {});
+        if (!body || !Array.isArray(body.episodes)) return;
+        const byNum = new Map();
+        for (const e of body.episodes) {
+          const n = Number(e.episode_number);
+          if (n) byNum.set(n, e);
+        }
+        for (const ep of s.episodes || []) {
+          const n = Number(ep.number || ep.episode || 0);
+          const te = byNum.get(n);
+          if (!te) continue;
+          // Título Magis → título TMDB (lo que la app muestra en lista de capítulos)
+          const tmdbName = String(te.name || '').trim();
+          if (tmdbName) {
+            ep.title = tmdbName;
+            ep.name = tmdbName;
+          }
+          const ov = String(te.overview || '').trim();
+          if (ov) {
+            ep.overview = ov;
+            ep.description = ov;
+          }
+          const still = tmdbImg(te.still_path, 'w300');
+          if (still) {
+            ep.still = still;
+            ep.poster = still;
+            ep.image = still;
+          }
+          const rt = Number(te.runtime);
+          if (rt > 0 && rt < 1000) {
+            ep.runtime = rt;
+            ep.duration = rt;
+          }
+          if (te.air_date) {
+            ep.airDate = String(te.air_date);
+            ep.air_date = ep.airDate;
+          }
+        }
+      }));
+
+      if (Array.isArray(item.episodes) && item.seasons.length) {
+        const curSn = Number((item.episodes[0] && item.episodes[0].season) || 1) || 1;
+        const cur = item.seasons.find(s => Number(s.number) === curSn) || item.seasons[0];
+        if (cur && cur.episodes && cur.episodes.length) item.episodes = cur.episodes;
+      }
+    } else {
+      // Película: logo + overview/poster si faltan
+      const movieId = await resolveTmdbId(item, false);
+      if (!movieId) return item;
+      const [detail, images] = await Promise.all([
+        tmdbGet('/movie/' + movieId, {}),
+        tmdbGet('/movie/' + movieId + '/images', { include_image_language: 'es,en,null' })
+      ]);
+      const logo = pickLogo(images);
+      if (logo) {
+        item.logo = logo;
+        item.clearlogo = logo;
+      }
+      if (detail) {
+        item.tmdbId = movieId;
+        if (!item.overview && detail.overview) {
+          item.overview = String(detail.overview);
+          item.description = item.overview;
+        }
+        if (!item.backdrop && detail.backdrop_path) {
+          item.backdrop = tmdbImg(detail.backdrop_path, 'w1280');
+          item.background = item.backdrop;
+        }
+        if ((!item.poster || !item.poster.length) && detail.poster_path) {
+          item.poster = tmdbImg(detail.poster_path, 'w500');
+          item.image = item.poster;
+        }
+        if (detail.runtime > 0) {
+          item.runtime = Number(detail.runtime);
+        }
+      }
     }
   } catch (_) {}
   return item;
