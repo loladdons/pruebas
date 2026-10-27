@@ -826,24 +826,71 @@ async function resolveChannel(channelCode) {
 // ─── API del addon (Nuvio / lolplus) ────────────────────────────────────────
 
 /**
- * La app llama setConfig(configMap) al cargar el repo.
- * Solo se aceptan email y password. Hosts/clave NO se pueden cambiar.
+ * La app NO llama a setConfig del plugin.
+ * Guarda la config del usuario en:
+ *   globalThis.__nuvioConfig.current
+ *   globalThis.__nuvioConfig['magis-live']
+ * Solo leemos email y password. Hosts/clave fijos.
  */
+function applyNuvioConfig() {
+  var cfg = null;
+  try {
+    var root = globalThis.__nuvioConfig || (typeof __nuvioConfig !== 'undefined' ? __nuvioConfig : null);
+    if (root) {
+      cfg = root.current || root['magis-live'] || root['magis_live'] || null;
+      // a veces es un mapa por id; tomar el primer objeto con email
+      if (!cfg || typeof cfg !== 'object') {
+        for (var k in root) {
+          if (!Object.prototype.hasOwnProperty.call(root, k)) continue;
+          var v = root[k];
+          if (v && typeof v === 'object' && (v.email || v.password)) {
+            cfg = v;
+            break;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  if (!cfg || typeof cfg !== 'object') return false;
+
+  var email = String(cfg.email || cfg.user || cfg.usuario || cfg.correo || '').trim();
+  var password = String(cfg.password || cfg.pass || cfg.contraseña || cfg.contrasena || '');
+
+  var changed = false;
+  if (email && email !== STATE.email) {
+    STATE.email = email;
+    changed = true;
+  }
+  if (password && password !== STATE.password) {
+    STATE.password = password;
+    changed = true;
+  }
+  if (changed) {
+    STATE.userToken = '';
+    STATE.userId = '';
+    STATE.categoriesCache = null;
+    STATE.channelsCache = {};
+    log('config leída de __nuvioConfig, email=', STATE.email ? 'sí' : 'no');
+  }
+  return !!(STATE.email && STATE.password);
+}
+
+/** Compat: si algún runtime llama setConfig del export */
 function setConfig(config) {
   if (!config || typeof config !== 'object') return;
   if (config.email) STATE.email = String(config.email).trim();
   if (config.password) STATE.password = String(config.password);
-  // Hosts, desKeyHex, appId, portal: fijos desde MagisConfig.defaults del lib.
-  // No se permiten overrides desde la config del repo.
   STATE.userToken = '';
   STATE.userId = '';
   STATE.categoriesCache = null;
   STATE.channelsCache = {};
-  log('config aplicada, email=', STATE.email ? '***' : '(vacío)');
+  log('setConfig export, email=', STATE.email ? 'sí' : 'no');
 }
 
 async function getHome() {
   try {
+    applyNuvioConfig();
     if (!STATE.email || !STATE.password) {
       return [
         {
@@ -852,7 +899,7 @@ async function getHome() {
             {
               id: 'magis:config',
               type: 'channel',
-              name: 'Abre Configuración del repo e introduce email y contraseña Magis',
+              name: 'Abre Configuración del repo, escribe email y contraseña, pulsa Guardar y vuelve a Home',
               poster: null,
             },
           ],
@@ -943,6 +990,7 @@ function channelToItem(ch) {
 }
 
 async function search(query) {
+  applyNuvioConfig();
   query = String(query || '')
     .trim()
     .toLowerCase();
@@ -969,6 +1017,7 @@ async function search(query) {
 }
 
 async function getMeta(id) {
+  applyNuvioConfig();
   id = String(id || '').replace(/^magis:/, '');
   if (!id || id === 'config' || id === 'error') {
     return {
@@ -1012,6 +1061,7 @@ async function getMeta(id) {
 }
 
 async function getStreams(id, type, season, episode) {
+  applyNuvioConfig();
   id = String(id || '').replace(/^magis:/, '');
   if (!id || id === 'config' || id === 'error') return [];
   try {
