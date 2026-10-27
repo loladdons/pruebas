@@ -1,16 +1,26 @@
 {
   "id": "magis-live",
   "name": "Magis Live TV",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "TV en vivo Magis / Xuper. Solo requiere email y contraseña. Hosts y clave del portal van fijos en el código (igual que el lib original).",
   "author": "MagisLive",
   "logo": "https://i.imgur.com/8QKQqQq.png",
   "icon": "https://i.imgur.com/8QKQqQq.png",
   "banner": "",
-  "types": ["live", "tv", "channel"],
+  "types": [
+    "live",
+    "tv",
+    "channel"
+  ],
   "entry": "plugin.js",
-  "resources": ["catalog", "meta", "stream"],
-  "idPrefixes": ["magis:"],
+  "resources": [
+    "catalog",
+    "meta",
+    "stream"
+  ],
+  "idPrefixes": [
+    "magis:"
+  ],
   "config": [
     {
       "key": "email",
@@ -18,7 +28,7 @@
       "type": "text",
       "required": true,
       "placeholder": "tu@email.com",
-      "description": "Cuenta del portal Magis/Xuper. Obligatoria para streams live."
+      "description": "Cuenta Magis/Xuper"
     },
     {
       "key": "password",
@@ -26,7 +36,7 @@
       "type": "password",
       "required": true,
       "placeholder": "••••••••",
-      "description": "Se guarda en la caché del repo solo en este dispositivo."
+      "description": "Se guarda solo en este dispositivo"
     }
   ],
   "theme": {
@@ -35,6 +45,9 @@
     "background": "#0D0D0D",
     "surface": "#1A1A1A"
   },
-  "categories": ["Live", "TV"],
+  "categories": [
+    "Live",
+    "TV"
+  ],
   "language": "es"
 }
