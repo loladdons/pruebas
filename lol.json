@@ -1,77 +1,56 @@
 {
-  "id": "cuevana-pro",
-  "name": "Cuevana Pro",
-  "version": "1.0.1",
-  "description": "Películas y series en Español Latino, Castellano e Inglés desde Cuevana. v1.0.1 — fix exports CommonJS para que la app cargue getHome/getStreams/etc.",
-  "author": "xuper-plugin (port)",
-  "repo": "cuevana-pro",
+  "id": "magis-live",
+  "name": "Magis Live TV",
+  "version": "1.0.0",
+  "description": "TV en vivo Magis / Xuper. Requiere cuenta (email + contraseña). Usa el protocolo del portal (3DES + sesión).",
+  "author": "MagisLive",
+  "logo": "https://i.imgur.com/8QKQqQq.png",
+  "icon": "https://i.imgur.com/8QKQqQq.png",
+  "banner": "",
+  "types": ["live", "tv", "channel"],
   "entry": "plugin.js",
-  "icon": "icon.png",
-  "apiVersion": 6,
-  "browser": true,
-  "section": {
-    "label": "Cuevana Pro"
-  },
-  "languages": [
-    "Latino",
-    "Castellano",
-    "Inglés"
-  ],
-  "capabilities": [
-    "home",
-    "discover",
-    "search",
-    "meta",
-    "streams"
-  ],
-  "tabs": [
-    "home",
-    "discover",
-    "search",
-    "library",
-    "settings"
-  ],
-  "newsImageStyle": "banner",
-  "episodesPagination": {
-    "enabled": true,
-    "perPage": 25
-  },
-  "theme": {
-    "accent": "#3B82F6",
-    "onAccent": "#FFFFFF",
-    "background": "#08101F",
-    "surface": "#111C33",
-    "highlight": "#93C5FD"
-  },
+  "resources": ["catalog", "meta", "stream"],
+  "idPrefixes": ["magis:"],
   "config": [
     {
-      "key": "pref_lang",
-      "label": "Idioma preferido",
-      "type": "select",
-      "default": "latino",
-      "description": "Se prioriza este idioma al listar servidores. Si falla, se ofrecen los demás.",
-      "options": [
-        {
-          "id": "latino",
-          "label": "Latino"
-        },
-        {
-          "id": "spanish",
-          "label": "Castellano"
-        },
-        {
-          "id": "english",
-          "label": "Inglés"
-        }
-      ]
+      "key": "email",
+      "label": "Email / Usuario Magis",
+      "type": "text",
+      "required": true,
+      "placeholder": "tu@email.com",
+      "description": "Cuenta del portal Magis/Xuper. Obligatoria para streams live."
+    },
+    {
+      "key": "password",
+      "label": "Contraseña",
+      "type": "password",
+      "required": true,
+      "placeholder": "••••••••",
+      "description": "Se guarda cifrada en la caché del repo (solo en este dispositivo)."
+    },
+    {
+      "key": "hosts",
+      "label": "Hosts del portal (opcional)",
+      "type": "text",
+      "required": false,
+      "placeholder": "bcdod.faolmbghu.com,osuhk.m3x8o50te.com",
+      "description": "Separados por coma. Si vacío, se usan los por defecto."
+    },
+    {
+      "key": "desKeyHex",
+      "label": "Clave 3DES (hex, opcional)",
+      "type": "text",
+      "required": false,
+      "placeholder": "e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8",
+      "description": "Solo si el portal cambió la clave. 24 bytes en hex."
     }
   ],
-  "notices": [
-    {
-      "id": "v1-first",
-      "title": "¡Primera versión de Cuevana Pro!",
-      "message": "Este repositorio es la versión 1.0.0 (port inicial). Incluye catálogo, búsqueda, detalles, episodios y servidores. Se esperan mejoras en extractores de video, estabilidad de mirrors y más opciones. ¡Gracias por probar!",
-      "buttonText": "Entendido"
-    }
-  ]
+  "theme": {
+    "accent": "#E53935",
+    "onAccent": "#FFFFFF",
+    "background": "#0D0D0D",
+    "surface": "#1A1A1A"
+  },
+  "categories": ["Live", "TV"],
+  "language": "es"
 }

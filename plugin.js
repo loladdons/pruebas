@@ -1,630 +1,1083 @@
 /**
- * Cuevana Pro — Addon SDK v6 (port 1.0.1)
- * Fuente: https://wv3.cuevana3.eu
- * Compatible con loadAddonCode (CommonJS module.exports) + callMethod.
- * Primera versión: se esperan mejoras en extractores.
+ * Magis Live TV — plugin para Nuvio / lolplus launcher
+ * Protocolo portal: body = hex(base64(3DES-EDE/ECB/PKCS5(json)))
+ * Sesión: anónimo (snToken + active) o login (v8/login)
+ * Live: v6/getLiveData + v4/startPlayLive + v14/getSlbInfo
+ *
+ * Config requerida (lol.json):
+ *   email, password  → cuenta Magis
+ *   hosts, desKeyHex → opcionales
+ *
+ * Nota: el player de la app debe enviar los headers Content-Auth / Content-License
+ * en cada request HLS. Si el player no reenvía headers a segmentos, la
+ * reproducción puede fallar; en ese caso usa el módulo Dart MagisLiveService
+ * (lib) con LiveHlsProxy.
  */
 
-var SITE = "https://wv3.cuevana3.eu";
-var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-var PAGE_SIZE = 24;
+'use strict';
 
-var GENRES = [
-  ["accion", "Acción"],
-  ["animacion", "Animación"],
-  ["aventura", "Aventura"],
-  ["ciencia-ficcion", "Ciencia Ficción"],
-  ["crimen", "Crimen"],
-  ["drama", "Drama"],
-  ["familia", "Familia"],
-  ["fantasia", "Fantasía"],
-  ["misterio", "Misterio"],
-  ["romance", "Romance"],
-  ["suspense", "Suspense"],
-  ["terror", "Terror"]
-];
+// ─── Config / estado ───────────────────────────────────────────────────────
+var CFG = {
+  desKeyHex: 'e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8',
+  hosts: ['bcdod.faolmbghu.com', 'osuhk.m3x8o50te.com'],
+  appId: 'com.android.msandroid',
+  apkVersion: '49902',
+  scheme: 'https',
+  portalCode: 'masnew',
+  spkgVer: '2025-08-07 05:40:11_36_16_',
+  snTokenSalt: 'ntFT65w6itH!lHCPw7D=@qnsFC5adD28',
+  passwordSalt: 'cloudstream',
+  fixedMac: '02:00:00:00:00:00',
+  liveRoot: 'masnew_live',
+  allCategoryId: 76182,
+};
 
-var MIRRORS = [
-  ["streamwish.to", "vibuxer.com"],
-  ["hglink.to", "vibuxer.com"],
-  ["swdyu.com", "vibuxer.com"],
-  ["cybervynx.com", "vibuxer.com"],
-  ["dumbalag.com", "vibuxer.com"],
-  ["mivalyo.com", "vidhidepro.com"],
-  ["dinisglows.com", "vidhidepro.com"],
-  ["dhtpre.com", "vidhidepro.com"]
-];
+var STATE = {
+  userId: '',
+  userToken: '',
+  jwtToken: '',
+  sn: '',
+  email: '',
+  password: '',
+  preferredHost: null,
+  categoriesCache: null,
+  channelsCache: {},
+  lastCallMs: 0,
+};
 
-function getUserConfig() {
+// ─── Utilidades ────────────────────────────────────────────────────────────
+function log() {
   try {
-    var cfg = (globalThis.__nuvioConfig && (globalThis.__nuvioConfig.current || globalThis.__nuvioConfig)) || {};
-    if (cfg && typeof cfg === "object") return cfg;
-  } catch (_) {}
-  return {};
-}
-
-function fixHost(url) {
-  try {
-    var u = new URL(url);
-    for (var i = 0; i < MIRRORS.length; i++) {
-      if (u.hostname === MIRRORS[i][0]) {
-        u.hostname = MIRRORS[i][1];
-        return u.href;
-      }
+    if (typeof console !== 'undefined' && console.log) {
+      console.log.apply(console, ['[MagisLive]'].concat([].slice.call(arguments)));
     }
   } catch (_) {}
-  return url;
 }
 
-function decode(s) {
-  return String(s || "")
-    .replace(/&#0?38;|&amp;/g, "&")
-    .replace(/&quot;|&#0?34;/g, '"')
-    .replace(/&#0?39;|&#x27;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
+function hexToBytes(hex) {
+  var clean = String(hex || '').replace(/[^0-9a-fA-F]/g, '');
+  var out = [];
+  for (var i = 0; i < clean.length; i += 2) {
+    out.push(parseInt(clean.substr(i, 2), 16));
+  }
+  return out;
 }
 
-function text(s) {
-  return decode(String(s || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+function bytesToHex(bytes) {
+  var s = '';
+  for (var i = 0; i < bytes.length; i++) {
+    var h = (bytes[i] & 0xff).toString(16);
+    if (h.length < 2) h = '0' + h;
+    s += h;
+  }
+  return s;
 }
 
-function posterOf(src) {
-  var s = decode(src || "");
-  if (s.indexOf("/_next/image?url=") === 0) {
-    try {
-      return decodeURIComponent(s.slice("/_next/image?url=".length).split("&")[0]);
-    } catch (_) {
-      return "";
+function utf8Encode(str) {
+  if (typeof TextEncoder !== 'undefined') {
+    return Array.from(new TextEncoder().encode(str));
+  }
+  var out = [];
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) {
+      out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    } else if (c < 0xd800 || c >= 0xe000) {
+      out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    } else {
+      i++;
+      var c2 = str.charCodeAt(i);
+      var u = 0x10000 + (((c & 0x3ff) << 10) | (c2 & 0x3ff));
+      out.push(
+        0xf0 | (u >> 18),
+        0x80 | ((u >> 12) & 0x3f),
+        0x80 | ((u >> 6) & 0x3f),
+        0x80 | (u & 0x3f)
+      );
     }
   }
-  return s.charAt(0) === "/" ? SITE + s : s;
+  return out;
 }
 
-function sized(u, w) {
-  return String(u || "").replace("/t/p/original/", "/t/p/" + w + "/");
+function utf8Decode(bytes) {
+  if (typeof TextDecoder !== 'undefined') {
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  }
+  var s = '';
+  for (var i = 0; i < bytes.length; ) {
+    var b = bytes[i++];
+    if (b < 0x80) s += String.fromCharCode(b);
+    else if (b < 0xe0) s += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i++] & 0x3f));
+    else if (b < 0xf0) {
+      s += String.fromCharCode(
+        ((b & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f)
+      );
+    } else {
+      var u =
+        ((b & 0x07) << 18) |
+        ((bytes[i++] & 0x3f) << 12) |
+        ((bytes[i++] & 0x3f) << 6) |
+        (bytes[i++] & 0x3f);
+      u -= 0x10000;
+      s += String.fromCharCode(0xd800 + (u >> 10), 0xdc00 + (u & 0x3ff));
+    }
+  }
+  return s;
 }
 
-function yearOf(d) {
-  var m = /^(\d{4})/.exec(d || "");
-  return m ? Number(m[1]) : undefined;
+function pkcs5Pad(data) {
+  var block = 8;
+  var pad = block - (data.length % block);
+  var out = data.slice();
+  for (var i = 0; i < pad; i++) out.push(pad);
+  return out;
 }
 
-async function fetchText(url, opts) {
-  opts = opts || {};
-  var headers = Object.assign(
-    {
-      "User-Agent": UA,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
-    },
-    opts.headers || {}
+function pkcs5Unpad(data) {
+  if (!data || !data.length) return data;
+  var pad = data[data.length - 1];
+  if (pad < 1 || pad > 8 || pad > data.length) return data;
+  return data.slice(0, data.length - pad);
+}
+
+// Base64 (sin depender de btoa en todos los runtimes)
+var B64 =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function base64Encode(bytes) {
+  var out = '';
+  for (var i = 0; i < bytes.length; i += 3) {
+    var a = bytes[i],
+      b = i + 1 < bytes.length ? bytes[i + 1] : 0,
+      c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    out += B64[a >> 2];
+    out += B64[((a & 3) << 4) | (b >> 4)];
+    out += i + 1 < bytes.length ? B64[((b & 15) << 2) | (c >> 6)] : '=';
+    out += i + 2 < bytes.length ? B64[c & 63] : '=';
+  }
+  return out;
+}
+
+function base64Decode(str) {
+  str = String(str).replace(/=+$/, '');
+  var out = [];
+  for (var i = 0; i < str.length; i += 4) {
+    var a = B64.indexOf(str[i]),
+      b = B64.indexOf(str[i + 1]),
+      c = B64.indexOf(str[i + 2]),
+      d = B64.indexOf(str[i + 3]);
+    out.push((a << 2) | (b >> 4));
+    if (c >= 0) out.push(((b & 15) << 4) | (c >> 2));
+    if (d >= 0) out.push(((c & 3) << 6) | d);
+  }
+  return out;
+}
+
+// ─── 3DES (CryptoJS si está, sino error claro) ─────────────────────────────
+function ensureCrypto() {
+  if (typeof CryptoJS === 'undefined') {
+    throw new Error(
+      'CryptoJS no está cargado. El runtime de la app debe inyectar crypto-js (assets).'
+    );
+  }
+}
+
+function encryptBody(plain) {
+  ensureCrypto();
+  var keyWords = CryptoJS.enc.Hex.parse(CFG.desKeyHex);
+  var encrypted = CryptoJS.TripleDES.encrypt(plain, keyWords, {
+    mode: CryptoJS.mode.ECB,
+    padding: CryptoJS.pad.Pkcs7,
+  });
+  // CryptoJS da Base64 del ciphertext; Magis espera hex(utf8(base64))
+  var b64 = encrypted.toString(); // Base64
+  return bytesToHex(utf8Encode(b64));
+}
+
+function decryptBlob(wire) {
+  ensureCrypto();
+  var inner = utf8Decode(hexToBytes(wire));
+  var keyWords = CryptoJS.enc.Hex.parse(CFG.desKeyHex);
+  var decrypted = CryptoJS.TripleDES.decrypt(
+    { ciphertext: CryptoJS.enc.Base64.parse(inner) },
+    keyWords,
+    { mode: CryptoJS.mode.ECB, padding: CryptoJS.pad.Pkcs7 }
   );
-  var res = await fetch(url, {
-    method: opts.method || "GET",
-    headers: headers
+  return decrypted.toString(CryptoJS.enc.Utf8);
+}
+
+// ─── MD5 estándar (para sn) ────────────────────────────────────────────────
+function md5Hex(str) {
+  ensureCrypto();
+  return CryptoJS.MD5(str).toString(CryptoJS.enc.Hex);
+}
+
+// ─── Tweaked MD5 (sign_o3) — port de TweakedMd5.kt ─────────────────────────
+var TMD5_SALT = utf8Encode('salt3333=4');
+var TMD5_S = [
+  7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5,
+  9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,
+  16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15,
+  21,
+];
+var TMD5_KT = (function () {
+  var t = [];
+  for (var i = 0; i < 64; i++) {
+    t[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0;
+  }
+  return t;
+})();
+var TMD5_ROUND1 = [
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+];
+var TMD5_G = (function () {
+  var g = [];
+  for (var i = 0; i < 64; i++) {
+    if (i < 16) g[i] = TMD5_ROUND1[i];
+    else if (i < 32) g[i] = (5 * i + 1) % 16;
+    else if (i < 48) g[i] = (3 * i + 5) % 16;
+    else g[i] = (7 * i) % 16;
+  }
+  return g;
+})();
+
+function rotl(x, n) {
+  var u = x >>> 0;
+  return ((u << n) | (u >>> (32 - n))) >>> 0;
+}
+
+function tmd5Compress(state, block, off) {
+  var m = [];
+  for (var j = 0; j < 16; j++) {
+    var p = off + j * 4;
+    m[j] =
+      (block[p] & 0xff) |
+      ((block[p + 1] & 0xff) << 8) |
+      ((block[p + 2] & 0xff) << 16) |
+      ((block[p + 3] & 0xff) << 24);
+  }
+  var a = state[0],
+    b = state[1],
+    c = state[2],
+    d = state[3];
+  for (var i = 0; i < 64; i++) {
+    var f;
+    if (i < 16) f = (b & c) | (~b & d);
+    else if (i < 32) f = (d & b) | (~d & c);
+    else if (i < 48) f = b ^ c ^ d;
+    else f = c ^ (b | ~d);
+    f = f >>> 0;
+    var sum = (f + a + TMD5_KT[i] + m[TMD5_G[i]]) >>> 0;
+    a = d;
+    d = c;
+    c = b;
+    b = (b + rotl(sum, TMD5_S[i])) >>> 0;
+  }
+  state[0] = (state[0] + a) >>> 0;
+  state[1] = (state[1] + b) >>> 0;
+  state[2] = (state[2] + c) >>> 0;
+  state[3] = (state[3] + d) >>> 0;
+}
+
+function tweakedMd5Hex(msgBytes) {
+  var state = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+  var remainder = msgBytes.length % 64;
+  var i = 0;
+  while (i + 64 <= msgBytes.length - remainder) {
+    tmd5Compress(state, msgBytes, i);
+    i += 64;
+  }
+  var tail = msgBytes.slice(msgBytes.length - remainder);
+  var padLen = ((56 - (tail.length + 1)) % 64 + 64) % 64;
+  var padding = [];
+  for (var p = 0; p < padLen; p++) padding.push(0);
+  var bits = msgBytes.length * 8;
+  var length = [];
+  for (var k = 0; k < 8; k++) length.push((bits >>> (k * 8)) & 0xff);
+  var finalBlock = tail.concat([0x80], padding, length);
+  for (var j = 0; j < finalBlock.length; j += 64) {
+    tmd5Compress(state, finalBlock, j);
+  }
+  var sb = '';
+  for (var w = 0; w < 4; w++) {
+    for (var b = 0; b < 4; b++) {
+      var hx = ((state[w] >>> (b * 8)) & 0xff).toString(16);
+      if (hx.length < 2) hx = '0' + hx;
+      sb += hx;
+    }
+  }
+  return sb;
+}
+
+function signO3(token, startMoment) {
+  var prefix =
+    'token=' +
+    token +
+    '&sign2_method=sign_o3&instance=0&start_moment=' +
+    startMoment;
+  var bytes = utf8Encode(prefix).concat(TMD5_SALT);
+  return tweakedMd5Hex(bytes);
+}
+
+// ─── HTTP (fetch del runtime) ──────────────────────────────────────────────
+function httpPost(url, headers, body) {
+  return new Promise(function (resolve, reject) {
+    // El runtime de la app expone fetch / axios vía puente
+    var opts = {
+      method: 'POST',
+      headers: headers || {},
+      body: body,
+    };
+    var p;
+    if (typeof fetch === 'function') {
+      p = fetch(url, opts).then(function (r) {
+        return r.text().then(function (t) {
+          return { status: r.status, body: t };
+        });
+      });
+    } else if (typeof httpFetch === 'function') {
+      p = httpFetch(url, opts);
+    } else {
+      reject(new Error('No hay fetch HTTP en el runtime JS'));
+      return;
+    }
+    p.then(resolve).catch(reject);
   });
-  if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
-  return await res.text();
 }
 
-function nextData(html) {
-  var m = /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/.exec(String(html || ""));
-  if (!m) return null;
-  try {
-    return JSON.parse(m[1]).props.pageProps || null;
-  } catch (_) {
-    return null;
-  }
+function sleep(ms) {
+  return new Promise(function (r) {
+    setTimeout(r, ms);
+  });
 }
 
-function parseCards(html) {
-  var out = [];
-  var seen = {};
-  var parts = String(html || "").split('<li class="TPostMv"');
-  for (var i = 1; i < parts.length; i++) {
-    var c = parts[i];
-    var href = /href="\/ver-(pelicula|serie)\/([^"\/?#]+)"/.exec(c);
-    var title = /<span class="Title block">([\s\S]*?)<\/span>/.exec(c);
-    if (!href || !title) continue;
-    var key = href[1] + href[2];
-    if (seen[key]) continue;
-    seen[key] = true;
-    var pic = /<img[^>]*\bsrc="([^"]+)"/.exec(c);
-    var year = /<span class="Year">\s*(\d{4})/.exec(c) || /class="Date[^"]*">\s*(\d{4})/.exec(c);
-    var vote = /<span class="Vote[^"]*">\s*([\d.]+)/.exec(c);
-    out.push({
-      slug: href[2],
-      kind: href[1] === "pelicula" ? "movie" : "series",
-      title: text(title[1]),
-      year: year ? Number(year[1]) : undefined,
-      poster: pic ? sized(posterOf(pic[1]), "w500") : "",
-      rating: vote ? Number(vote[1]) : undefined
-    });
-  }
-  return out;
+async function throttle() {
+  var now = Date.now();
+  var delta = now - STATE.lastCallMs;
+  if (delta < 400) await sleep(400 - delta);
+  STATE.lastCallMs = Date.now();
 }
 
-function parseTitle(html) {
-  var p = nextData(html);
-  var t = p && (p.thisMovie || p.thisSerie);
-  if (!t || !t.titles) return null;
-  var seasons = (t.seasons || [])
-    .map(function (s) {
-      return {
-        number: Number(s.number),
-        name: "Temporada " + s.number,
-        episodes: (s.episodes || []).map(function (e) {
-          return {
-            number: Number(e.number),
-            id: e.id || "e" + e.number,
-            title: String(e.title || "Episodio " + e.number),
-            overview: String(e.overview || e.description || "").trim() || undefined,
-            still: sized(e.image, "w300") || undefined,
-            runtime: e.runtime ? Number(e.runtime) : undefined
-          };
-        })
-      };
-    })
-    .filter(function (s) {
-      return s.episodes.length;
-    });
+function deviceDict(snOverride) {
   return {
-    tmdb: Number(t.TMDbId) > 0 ? Number(t.TMDbId) : undefined,
-    kind: p.thisMovie ? "movie" : "series",
-    slug: t.slug && t.slug.name ? String(t.slug.name) : "",
-    title: String(t.titles.name || ""),
-    original: String((t.titles.original && t.titles.original.name) || ""),
-    overview: String(t.overview || "").trim(),
-    genres: (t.genres || []).map(function (g) {
-      return String(g.name);
-    }),
-    year: yearOf(t.releaseDate),
-    runtimeMinutes: t.runtime ? Number(t.runtime) : undefined,
-    rating: t.rate && t.rate.average ? Number(t.rate.average) : undefined,
-    poster: sized(t.images && t.images.poster, "w500"),
-    backdrop: sized(t.images && t.images.backdrop, "w1280"),
-    seasons: seasons
+    loginType: '2',
+    appLanguage: 'en',
+    apkVersion: CFG.apkVersion,
+    sysVersion: CFG.spkgVer,
+    appId: CFG.appId,
+    hardwareInfo: 'ranchu',
+    model: 'sdk_gphone64_arm64',
+    product: 'sdk_gphone64_arm64',
+    cpu: 'arm64-v8a',
+    B29: '',
+    reserve1: '',
+    deviceToken: '',
+    sn: snOverride != null ? snOverride : STATE.sn || '',
+    drmId: '',
+    sdkVer: 36,
   };
 }
 
-function parseServers(html) {
-  var p = nextData(html);
-  var t = p && (p.thisMovie || p.episode);
-  var v = t && t.videos;
-  if (!v) return [];
+function hostOrder() {
+  var hosts = CFG.hosts.filter(Boolean);
+  if (!hosts.length) return [];
+  if (STATE.preferredHost && hosts.indexOf(STATE.preferredHost) >= 0) {
+    return [STATE.preferredHost].concat(
+      hosts.filter(function (h) {
+        return h !== STATE.preferredHost;
+      })
+    );
+  }
+  return hosts;
+}
+
+async function portalCall(path, bean, opts) {
+  opts = opts || {};
+  var baseFields = opts.baseFields !== false;
+  var bodyMap = {};
+  if (baseFields) {
+    bodyMap.portalCode = CFG.portalCode;
+    bodyMap.userId = STATE.userId || '';
+    bodyMap.userToken = STATE.userToken || '';
+  }
+  if (bean) {
+    for (var k in bean) if (Object.prototype.hasOwnProperty.call(bean, k)) bodyMap[k] = bean[k];
+  }
+  var dd = deviceDict(opts.sn);
+  for (var d in dd) if (Object.prototype.hasOwnProperty.call(dd, d)) bodyMap[d] = dd[d];
+
+  var plain = JSON.stringify(bodyMap);
+  var wire = encryptBody(plain);
+  var headers = {
+    'Content-Type': 'application/json;charset=utf-8',
+    apk: CFG.appId,
+    apkVer: '43404',
+    spkgVer: CFG.spkgVer,
+    'User-Agent': 'okhttp/3.12.12',
+  };
+
+  await throttle();
+  var lastError = null;
+  var hosts = hostOrder();
+  for (var hi = 0; hi < hosts.length; hi++) {
+    var host = hosts[hi];
+    var url = CFG.scheme + '://' + host + '/api/portalCore/' + path;
+    try {
+      var res = await httpPost(url, headers, wire);
+      if (!res || res.status < 200 || res.status >= 300) {
+        lastError = 'HTTP ' + (res && res.status);
+        continue;
+      }
+      var j = JSON.parse(res.body);
+      var rc = String(j.returnCode != null ? j.returnCode : j.retCode != null ? j.retCode : '');
+      if (rc && rc !== '0' && rc !== '0000' && rc !== '200') {
+        var msg = String(j.returnMsg || j.retMsg || j.msg || j.message || rc);
+        return { ok: false, code: rc, message: msg };
+      }
+      STATE.preferredHost = host;
+      var dataField = j.data;
+      if (typeof dataField === 'string' && dataField.trim()) {
+        try {
+          var decrypted = decryptBlob(dataField.trim());
+          var inner = JSON.parse(decrypted);
+          return { ok: true, data: inner };
+        } catch (e) {
+          try {
+            var inner2 = JSON.parse(dataField);
+            return { ok: true, data: inner2 };
+          } catch (_) {
+            lastError = 'decrypt: ' + e;
+            continue;
+          }
+        }
+      }
+      if (dataField && typeof dataField === 'object') {
+        return { ok: true, data: dataField };
+      }
+      return { ok: true, data: j };
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  return {
+    ok: false,
+    code: 'network',
+    message: 'todos los hosts fallaron: ' + lastError,
+  };
+}
+
+// ─── Sesión ────────────────────────────────────────────────────────────────
+async function ensureAnonymous() {
+  if (STATE.userToken) return { ok: true };
+  if (STATE.sn) {
+    var act = await activate('');
+    if (act.ok) return act;
+  }
+  return mintDevice();
+}
+
+async function mintDevice() {
+  var r = await portalCall(
+    'v3/snToken',
+    {
+      loginType: '2',
+      appLanguage: 'en',
+      apkVersion: CFG.apkVersion,
+      sysVersion: CFG.spkgVer,
+      appId: CFG.appId,
+      hardwareInfo: 'ranchu',
+      model: 'sdk_gphone64_arm64',
+      product: 'sdk_gphone64_arm64',
+      cpu: 'arm64-v8a',
+      B29: '',
+      reserve1: '',
+      deviceToken: '',
+      sn: '',
+      drmId: '',
+      sdkVer: 36,
+    },
+    { baseFields: false }
+  );
+  if (!r.ok) return r;
+  var snToken = String((r.data && r.data.snToken) || '').trim();
+  if (!snToken) {
+    return { ok: false, code: 'snToken_failed', message: 'sin snToken' };
+  }
+  var snVal = String((r.data && r.data.sn) || '')
+    .trim()
+    .toLowerCase();
+  if (!snVal) snVal = md5Hex(snToken + CFG.snTokenSalt);
+  STATE.sn = snVal;
+  return activate(snToken);
+}
+
+async function activate(snToken) {
+  var r = await portalCall(
+    'v8/active',
+    {
+      snToken: snToken || '',
+      authVersion: '',
+      authCode: '',
+      preCode: '',
+      macAddr: CFG.fixedMac,
+      reserve1: '',
+      openNum: 4,
+      channel: 'default',
+      matadata: '',
+      signdata: '',
+    },
+    { baseFields: false }
+  );
+  if (!r.ok) return r;
+  var ut = String((r.data && r.data.userToken) || '').trim();
+  if (!ut) {
+    return { ok: false, code: 'active_sin_token', message: 'sin userToken' };
+  }
+  STATE.userId = String((r.data && r.data.userId) || '');
+  STATE.userToken = ut;
+  STATE.jwtToken = String((r.data && r.data.jwtToken) || '');
+  if (r.data && r.data.sn) STATE.sn = String(r.data.sn);
+  return { ok: true };
+}
+
+async function login(email, password) {
+  email = String(email || '').trim();
+  password = String(password || '');
+  if (!email || !password) {
+    return { ok: false, code: 'auth', message: 'email y password requeridos' };
+  }
+  // Asegurar dispositivo anónimo primero (como Kino)
+  var anon = await ensureAnonymous();
+  if (!anon.ok && !STATE.sn) {
+    // seguir igual; algunos builds aceptan login sin sn
+  }
+  var passHash = md5Hex(password + CFG.passwordSalt);
+  var r = await portalCall('v8/login', {
+    email: email,
+    password: passHash,
+    loginType: '1',
+  });
+  if (!r.ok) return r;
+  var ut = String((r.data && r.data.userToken) || '').trim();
+  if (!ut) {
+    return { ok: false, code: 'login_sin_token', message: 'login sin userToken' };
+  }
+  STATE.userId = String((r.data && r.data.userId) || STATE.userId);
+  STATE.userToken = ut;
+  STATE.jwtToken = String((r.data && r.data.jwtToken) || STATE.jwtToken);
+  STATE.email = email;
+  STATE.password = password;
+  return { ok: true };
+}
+
+async function ensureSession() {
+  if (STATE.userToken) return { ok: true };
+  if (STATE.email && STATE.password) {
+    var lr = await login(STATE.email, STATE.password);
+    if (lr.ok) return lr;
+  }
+  return ensureAnonymous();
+}
+
+// ─── Catálogo ──────────────────────────────────────────────────────────────
+function categoryName(raw) {
+  var s = String(raw || '').trim();
+  if (!s) return 'Sin nombre';
+  return s;
+}
+
+function isAdult(name) {
+  var n = String(name || '').toLowerCase();
+  return (
+    n.indexOf('adult') >= 0 ||
+    n.indexOf('+18') >= 0 ||
+    n.indexOf('xxx') >= 0 ||
+    n.indexOf('erotic') >= 0
+  );
+}
+
+async function fetchCategories(force) {
+  if (!force && STATE.categoriesCache) return { ok: true, data: STATE.categoriesCache };
+  var s = await ensureSession();
+  if (!s.ok) return s;
+
+  var r = await portalCall('v6/nextColumns', {
+    columnCode: CFG.liveRoot,
+    pageNum: 1,
+    pageSize: 200,
+  });
   var out = [];
-  var langs = Object.keys(v);
-  for (var i = 0; i < langs.length; i++) {
-    var lang = langs[i];
-    var list = v[lang];
-    if (!Array.isArray(list)) continue;
-    for (var j = 0; j < list.length; j++) {
-      var e = list[j];
-      if (e && typeof e.result === "string") {
-        out.push({
-          lang: String(lang),
-          host: String(e.cyberlocker || e.host || "server"),
-          url: e.result
-        });
+  if (r.ok && r.data) {
+    var list = r.data.recommendList || r.data.columnList || r.data.list || [];
+    if (Array.isArray(list)) {
+      for (var i = 0; i < list.length; i++) {
+        var c = list[i];
+        if (!c || typeof c !== 'object') continue;
+        var id = parseInt(c.columnId != null ? c.columnId : c.id, 10);
+        if (isNaN(id)) continue;
+        var name = categoryName(c.name);
+        out.push({ id: id, name: name, adult: isAdult(name) });
       }
     }
   }
-  return out;
-}
-
-function parsePlayer(html) {
-  var m = /var url = '([^']+)'/.exec(String(html || ""));
-  return m ? fixHost(m[1]) : null;
-}
-
-function cardToItem(c) {
-  return {
-    id: (c.kind === "movie" ? "m" : "s") + ":" + c.slug,
-    title: c.title,
-    poster: c.poster || "",
-    type: c.kind === "movie" ? "movie" : "series",
-    year: c.year ? String(c.year) : undefined,
-    rating: c.rating
-  };
-}
-
-function langLabel(lang) {
-  var map = {
-    latino: "Latino",
-    spanish: "Castellano",
-    english: "Inglés",
-    japanese: "Japonés",
-    subtitulado: "Subtitulado"
-  };
-  var k = String(lang || "").toLowerCase();
-  return map[k] || String(lang || "");
-}
-
-function preferLang(servers) {
-  var cfg = getUserConfig();
-  var pref = String(cfg.pref_lang || "latino").toLowerCase();
-  var order = [pref, "latino", "spanish", "english", "japanese"];
-  return servers.slice().sort(function (a, b) {
-    var ia = order.indexOf(String(a.lang).toLowerCase());
-    var ib = order.indexOf(String(b.lang).toLowerCase());
-    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  var hasAll = out.some(function (c) {
+    return c.id === CFG.allCategoryId;
   });
+  if (!hasAll) {
+    out.unshift({ id: CFG.allCategoryId, name: 'Todos', adult: false });
+  }
+  if (!out.length) {
+    out.push({ id: CFG.allCategoryId, name: 'Todos', adult: false });
+  }
+  STATE.categoriesCache = out;
+  return { ok: true, data: out };
 }
 
-async function listCards(path, page) {
-  page = page || 1;
-  var url = SITE + path + (page > 1 ? "/page/" + page : "");
-  var html = await fetchText(url, { headers: { Referer: SITE + "/" } });
-  return parseCards(html);
+async function fetchChannels(columnId, force) {
+  columnId = columnId || CFG.allCategoryId;
+  if (!force && STATE.channelsCache[columnId]) {
+    return { ok: true, data: STATE.channelsCache[columnId] };
+  }
+  var s = await ensureSession();
+  if (!s.ok) return s;
+
+  var all = [];
+  var page = 1;
+  var maxPages = 6;
+  var pageSize = 500;
+  while (page <= maxPages) {
+    var r = await portalCall('v6/getLiveData', {
+      columnId: columnId,
+      pageNum: page,
+      pageSize: pageSize,
+      type: '1',
+    });
+    if (!r.ok) {
+      if (page === 1) return r;
+      break;
+    }
+    var list =
+      (r.data && (r.data.liveList || r.data.list || r.data.channelList)) || [];
+    if (!Array.isArray(list) || !list.length) break;
+    for (var i = 0; i < list.length; i++) {
+      var ch = list[i];
+      if (!ch || typeof ch !== 'object') continue;
+      var code = String(ch.channelCode || ch.code || ch.liveCode || '').trim();
+      if (!code) continue;
+      var name = String(ch.name || ch.channelName || code).trim();
+      var number = parseInt(ch.channelNumber || ch.number || 0, 10) || 0;
+      var logo = ch.logo || ch.posterUrl || ch.icon || null;
+      all.push({
+        code: code,
+        name: name,
+        number: number,
+        logo: logo,
+        adult: isAdult(name) || ch.adult === true,
+        provider: 'xuper',
+      });
+    }
+    if (list.length < pageSize) break;
+    page++;
+  }
+  // dedupe by code
+  var seen = {};
+  var uniq = [];
+  for (var j = 0; j < all.length; j++) {
+    if (seen[all[j].code]) continue;
+    seen[all[j].code] = true;
+    uniq.push(all[j]);
+  }
+  STATE.channelsCache[columnId] = uniq;
+  return { ok: true, data: uniq };
 }
 
-async function getPage(pathOrUrl) {
-  var url = pathOrUrl.indexOf("http") === 0 ? pathOrUrl : SITE + pathOrUrl;
-  return fetchText(url, { headers: { Referer: SITE + "/" } });
+// ─── Resolve stream ────────────────────────────────────────────────────────
+function extractTokenFromAuthBase(authBase) {
+  if (!authBase) return '';
+  var m = String(authBase).match(/[?&]token=([0-9a-fA-F]{32})/);
+  return m ? m[1] : '';
+}
+
+async function resolveChannel(channelCode) {
+  var s = await ensureSession();
+  if (!s.ok) return s;
+  if (!STATE.email) {
+    // Live suele exigir cuenta
+    log('sin cuenta: intentando igual (puede fallar)');
+  }
+
+  var play = await portalCall('v4/startPlayLive', {
+    channelCode: channelCode,
+    columnId: 0,
+    type: '1',
+  });
+  if (!play.ok) return play;
+
+  var data = play.data || {};
+  var liveAddressList = data.liveAddressList || data.addressList || [];
+  var license = '';
+  var playCode = channelCode;
+  if (Array.isArray(liveAddressList) && liveAddressList.length) {
+    var first = liveAddressList[0];
+    if (typeof first === 'object') {
+      license = String(first.license || first.licence || first.key || '');
+      playCode = String(first.playCode || first.code || channelCode);
+    }
+  }
+  if (!license && data.license) license = String(data.license);
+  if (!license) {
+    return {
+      ok: false,
+      code: 'live_no_license',
+      message: 'Sin licencia para ' + channelCode,
+    };
+  }
+
+  var slb = await portalCall('v14/getSlbInfo', {
+    hasPay: '0',
+    userIdentity: '1',
+    type: 'merge',
+    appVer: CFG.apkVersion,
+    lang: 'es',
+    encMediaSupported: 1,
+    liveCodeList: [channelCode],
+    appParams: '',
+    reserve1: CFG.fixedMac,
+  });
+  if (!slb.ok) return slb;
+
+  var cdns = [];
+  var slbData = slb.data || {};
+  var cflList =
+    slbData.cflList ||
+    slbData.cdnList ||
+    slbData.liveCdnList ||
+    slbData.list ||
+    [];
+  if (!Array.isArray(cflList) && typeof cflList === 'object') {
+    cflList = Object.keys(cflList).map(function (k) {
+      return cflList[k];
+    });
+  }
+  if (Array.isArray(cflList)) {
+    for (var i = 0; i < cflList.length; i++) {
+      var item = cflList[i];
+      if (!item || typeof item !== 'object') continue;
+      var tag = String(item.tag || item.type || '').toLowerCase();
+      if (tag && tag !== 'live' && tag !== 'cfl') continue;
+      var host = String(item.cflHost || item.host || item.domain || '').trim();
+      var auth = String(item.authBase || item.auth || item.url || '').trim();
+      if (host && auth) cdns.push({ cflHost: host, authBase: auth });
+    }
+  }
+  // fallback: campos planos
+  if (!cdns.length && slbData.cflHost && slbData.authBase) {
+    cdns.push({
+      cflHost: String(slbData.cflHost),
+      authBase: String(slbData.authBase),
+    });
+  }
+  if (!cdns.length) {
+    return {
+      ok: false,
+      code: 'live_no_cfl_cdn',
+      message: 'No hay CDN cfl para ' + channelCode,
+    };
+  }
+
+  var cdn = cdns[0];
+  var token = extractTokenFromAuthBase(cdn.authBase);
+  if (!token) {
+    return {
+      ok: false,
+      code: 'live_no_cfl_token',
+      message: 'authBase sin token= para ' + channelCode,
+    };
+  }
+
+  var moment = Date.now();
+  var sign = signO3(token, moment);
+  // Headers típicos Magis HLS
+  var headers = {
+    'Content-Auth':
+      'token=' + token + ';sign=' + sign + ';start_moment=' + moment,
+    'Content-License': license,
+    'User-Agent': 'okhttp/3.12.12',
+  };
+
+  var playlistUrl =
+    'http://' + cdn.cflHost + '/live/' + playCode + '.m3u8?token=' + token;
+
+  return {
+    ok: true,
+    data: {
+      url: playlistUrl,
+      playCode: playCode,
+      license: license,
+      token: token,
+      cflHost: cdn.cflHost,
+      authBase: cdn.authBase,
+      headers: headers,
+      // el player debe regenerar Content-Auth por segmento con sign_o3
+      // si no, la reproducción se corta; para eso existe LiveHlsProxy en Dart
+    },
+  };
+}
+
+// ─── API del addon (Nuvio / lolplus) ────────────────────────────────────────
+
+/**
+ * La app llama setConfig(configMap) al cargar el repo.
+ * keys: email, password, hosts, desKeyHex
+ */
+function setConfig(config) {
+  if (!config || typeof config !== 'object') return;
+  if (config.email) STATE.email = String(config.email).trim();
+  if (config.password) STATE.password = String(config.password);
+  if (config.hosts) {
+    var h = String(config.hosts)
+      .split(/[\s,;]+/)
+      .map(function (x) {
+        return x.trim();
+      })
+      .filter(Boolean);
+    if (h.length) CFG.hosts = h;
+  }
+  if (config.desKeyHex && String(config.desKeyHex).trim().length >= 48) {
+    CFG.desKeyHex = String(config.desKeyHex).trim();
+  }
+  // limpiar sesión al cambiar cuenta
+  STATE.userToken = '';
+  STATE.userId = '';
+  STATE.categoriesCache = null;
+  STATE.channelsCache = {};
+  log('config aplicada, email=', STATE.email ? '***' : '(vacío)');
 }
 
 async function getHome() {
-  var rows = [];
-  async function safe(id, title, path, type, imageStyle) {
-    try {
-      var cards = await listCards(path, 1);
-      var items = cards.slice(0, 18).map(cardToItem);
-      if (!items.length) return;
+  try {
+    if (!STATE.email || !STATE.password) {
+      return [
+        {
+          title: 'Configura tu cuenta',
+          items: [
+            {
+              id: 'magis:config',
+              type: 'channel',
+              name: 'Abre Configuración del repo e introduce email y contraseña Magis',
+              poster: null,
+            },
+          ],
+        },
+      ];
+    }
+    var lr = await login(STATE.email, STATE.password);
+    if (!lr.ok) {
+      return [
+        {
+          title: 'Error de login',
+          items: [
+            {
+              id: 'magis:error',
+              type: 'channel',
+              name: (lr.code || '') + ': ' + (lr.message || 'login falló'),
+              poster: null,
+            },
+          ],
+        },
+      ];
+    }
+    var cats = await fetchCategories(true);
+    if (!cats.ok) {
+      return [
+        {
+          title: 'Error catálogo',
+          items: [
+            {
+              id: 'magis:error',
+              type: 'channel',
+              name: (cats.code || '') + ': ' + (cats.message || ''),
+              poster: null,
+            },
+          ],
+        },
+      ];
+    }
+    var rows = [];
+    // "Todos" primero (limitado)
+    var allCh = await fetchChannels(CFG.allCategoryId, true);
+    if (allCh.ok && allCh.data && allCh.data.length) {
       rows.push({
-        id: id,
-        title: title,
-        type: type || "row",
-        imageStyle: imageStyle || "poster",
-        items: items
-      });
-    } catch (e) {}
-  }
-
-  await safe("hero_estrenos", "Destacados / Estrenos", "/peliculas/estrenos", "hero", "backdrop");
-  await safe("peliculas", "Películas actualizadas", "/peliculas", "row", "poster");
-  await safe("series", "Series actualizadas", "/series", "row", "poster");
-  await safe("tendencias", "Tendencias películas", "/peliculas/tendencias/semana", "row", "backdrop");
-  await safe("stendencias", "Tendencias series", "/series/tendencias/semana", "row", "poster");
-  await safe("sestrenos", "Series estrenos", "/series/estrenos", "row", "poster");
-
-  try {
-    var genreItems = GENRES.slice(0, 8).map(function (g) {
-      return {
-        id: "cat_genre_" + g[0],
-        title: g[1],
-        type: "catalog",
-        poster: "",
-        overview: "Catálogo de " + g[1]
-      };
-    });
-    rows.push({
-      id: "catalogos_generos",
-      title: "Géneros",
-      type: "catalog",
-      imageStyle: "poster",
-      items: genreItems
-    });
-  } catch (_) {}
-
-  return rows;
-}
-
-async function getNews() {
-  var items = [];
-  try {
-    var seriesCards = await listCards("/series", 1);
-    for (var i = 0; i < Math.min(12, seriesCards.length); i++) {
-      var c = seriesCards[i];
-      items.push({
-        id: "s:" + c.slug,
-        title: c.title,
-        overview: "Serie actualizada recientemente en Cuevana.",
-        poster: c.poster,
-        backdrop: c.poster,
-        type: "series",
-        year: c.year ? String(c.year) : undefined,
-        rating: c.rating,
-        imageStyle: "banner"
+        title: 'Todos los canales',
+        items: allCh.data.slice(0, 80).map(channelToItem),
       });
     }
-    var movieCards = await listCards("/peliculas/estrenos", 1);
-    for (var j = 0; j < Math.min(8, movieCards.length); j++) {
-      var m = movieCards[j];
-      items.push({
-        id: "m:" + m.slug,
-        title: m.title,
-        overview: "Estreno reciente.",
-        poster: m.poster,
-        backdrop: m.poster,
-        type: "movie",
-        year: m.year ? String(m.year) : undefined,
-        rating: m.rating,
-        imageStyle: "banner"
+    for (var i = 0; i < cats.data.length; i++) {
+      var cat = cats.data[i];
+      if (cat.id === CFG.allCategoryId) continue;
+      var ch = await fetchChannels(cat.id, false);
+      if (!ch.ok || !ch.data || !ch.data.length) continue;
+      rows.push({
+        title: cat.name,
+        items: ch.data.slice(0, 40).map(channelToItem),
       });
+      if (rows.length >= 12) break;
     }
-  } catch (_) {}
-  return items;
-}
-
-async function getAds() {
-  return [
-    {
-      id: "aviso_v1",
-      title: "Primera versión de Cuevana Pro",
-      message:
-        "Estás usando la versión 1.0.1 (port inicial). Incluye catálogo, búsqueda, detalles, episodios y listado de servidores. Algunas extracciones de video (especialmente VOE) pueden mejorar en próximas actualizaciones. ¡Gracias por probar!",
-      buttonText: "Entendido"
-    }
-  ];
-}
-
-async function getDiscoverFilters() {
-  return [
-    {
-      id: "type",
-      label: "Tipo",
-      options: [
-        { id: "all", label: "Todo" },
-        { id: "movie", label: "Películas" },
-        { id: "series", label: "Series" }
-      ]
-    },
-    {
-      id: "genre",
-      label: "Género",
-      options: [{ id: "all", label: "Todos" }].concat(
-        GENRES.map(function (g) {
-          return { id: g[0], label: g[1] };
-        })
-      )
-    }
-  ];
-}
-
-async function getDiscover(opts) {
-  opts = opts || {};
-  var page = Math.max(1, Number(opts.page) || 1);
-  var type = String(opts.type || opts.filter || "all").toLowerCase();
-  var genre = String(opts.genre || "all").toLowerCase();
-
-  var path = "/peliculas";
-  if (genre && genre !== "all" && genre !== "movie" && genre !== "series" && genre !== "peliculas") {
-    path = "/genero/" + genre;
-  } else if (type === "series") {
-    path = "/series";
-  } else if (type === "movie" || type === "peliculas") {
-    path = "/peliculas";
-  }
-
-  try {
-    var cards = await listCards(path, page);
-    var items = cards.map(cardToItem);
-    if (type === "movie") {
-      items = items.filter(function (it) {
-        return it.type === "movie";
-      });
-    }
-    if (type === "series") {
-      items = items.filter(function (it) {
-        return it.type === "series";
-      });
-    }
-    return {
-      page: page,
-      hasMore: cards.length >= PAGE_SIZE,
-      items: items
-    };
+    return rows;
   } catch (e) {
-    return { page: page, hasMore: false, items: [] };
+    log('getHome error', e);
+    return [
+      {
+        title: 'Error',
+        items: [
+          {
+            id: 'magis:error',
+            type: 'channel',
+            name: String(e && e.message ? e.message : e),
+            poster: null,
+          },
+        ],
+      },
+    ];
   }
 }
 
-async function getCatalogs() {
-  return GENRES.map(function (g) {
-    return {
-      id: "cat_genre_" + g[0],
-      title: g[1],
-      description: "Películas y series de " + g[1],
-      poster: "",
-      type: "catalog"
-    };
-  });
-}
-
-async function getCatalog(catalogId, options) {
-  options = options || {};
-  var page = Math.max(1, Number(options.page) || 1);
-  var m = /^cat_genre_(.+)$/.exec(String(catalogId || ""));
-  if (!m) return { page: page, hasMore: false, items: [] };
-  var slug = m[1];
-  try {
-    var cards = await listCards("/genero/" + slug, page);
-    return {
-      page: page,
-      hasMore: cards.length >= PAGE_SIZE,
-      items: cards.map(cardToItem)
-    };
-  } catch (_) {
-    return { page: page, hasMore: false, items: [] };
-  }
+function channelToItem(ch) {
+  return {
+    id: 'magis:' + ch.code,
+    type: 'channel',
+    name: ch.name,
+    poster: ch.logo || null,
+    logo: ch.logo || null,
+    description: 'Canal #' + (ch.number || '') + ' · ' + ch.code,
+    genres: ch.adult ? ['Adultos'] : ['Live'],
+  };
 }
 
 async function search(query) {
-  var q = String(query || "").trim();
-  if (q.length < 2) return [];
+  query = String(query || '')
+    .trim()
+    .toLowerCase();
+  if (!query) return [];
   try {
-    var html = await fetchText(SITE + "/search?q=" + encodeURIComponent(q), {
-      headers: { Referer: SITE + "/" }
-    });
-    var cards = parseCards(html);
-    return cards.slice(0, 40).map(cardToItem);
-  } catch (_) {
+    if (STATE.email && STATE.password && !STATE.userToken) {
+      await login(STATE.email, STATE.password);
+    }
+    var all = await fetchChannels(CFG.allCategoryId, false);
+    if (!all.ok) return [];
+    return all.data
+      .filter(function (ch) {
+        return (
+          ch.name.toLowerCase().indexOf(query) >= 0 ||
+          ch.code.toLowerCase().indexOf(query) >= 0
+        );
+      })
+      .slice(0, 50)
+      .map(channelToItem);
+  } catch (e) {
+    log('search', e);
     return [];
   }
 }
 
-async function getMeta(id, opts) {
-  opts = opts || {};
-  var raw = String(id || "");
-  var m = /^(m|s):([a-z0-9-]+)/i.exec(raw);
-  if (!m) return null;
-  var kind = m[1].toLowerCase() === "m" ? "movie" : "series";
-  var slug = m[2];
-  var path = kind === "movie" ? "/ver-pelicula/" + slug : "/ver-serie/" + slug;
-  try {
-    var html = await getPage(path);
-    var p = parseTitle(html);
-    if (!p) return null;
-
-    var meta = {
-      id: (kind === "movie" ? "m" : "s") + ":" + slug,
-      title: p.title,
-      poster: p.poster || "",
-      backdrop: p.backdrop || "",
-      overview: p.overview || "",
-      type: kind === "movie" ? "movie" : "series",
-      year: p.year ? String(p.year) : undefined,
-      rating: p.rating,
-      genres: p.genres && p.genres.length ? p.genres : undefined
+async function getMeta(id) {
+  id = String(id || '').replace(/^magis:/, '');
+  if (!id || id === 'config' || id === 'error') {
+    return {
+      id: 'magis:' + id,
+      type: 'channel',
+      name: id,
+      description: 'Configura email/password en el repo.',
     };
-
-    if (kind === "series" && p.seasons && p.seasons.length) {
-      meta.seasons = p.seasons.map(function (s) {
-        return {
-          number: s.number,
-          name: s.name || "Temporada " + s.number,
-          episodes: s.episodes.map(function (e) {
-            return {
-              number: e.number,
-              id: "e:" + slug + ":" + s.number + ":" + e.number,
-              title: e.title || "Episodio " + e.number,
-              overview: e.overview,
-              still: e.still,
-              runtime: e.runtime
-            };
-          })
-        };
-      });
+  }
+  try {
+    var all = await fetchChannels(CFG.allCategoryId, false);
+    var ch = null;
+    if (all.ok) {
+      for (var i = 0; i < all.data.length; i++) {
+        if (all.data[i].code === id) {
+          ch = all.data[i];
+          break;
+        }
+      }
     }
-    return meta;
-  } catch (_) {
-    return null;
+    if (!ch) {
+      return {
+        id: 'magis:' + id,
+        type: 'channel',
+        name: id,
+        description: 'Canal live Magis',
+      };
+    }
+    return {
+      id: 'magis:' + ch.code,
+      type: 'channel',
+      name: ch.name,
+      poster: ch.logo,
+      logo: ch.logo,
+      description: 'En vivo · código ' + ch.code,
+      genres: ['Live', 'TV'],
+    };
+  } catch (e) {
+    return { id: 'magis:' + id, type: 'channel', name: id };
   }
 }
 
 async function getStreams(id, type, season, episode) {
-  var raw = String(id || "");
-  var pageUrl = null;
-
-  var epMatch = /^e:([a-z0-9-]+):(\d+):(\d+)$/i.exec(raw);
-  if (epMatch) {
-    pageUrl =
-      SITE +
-      "/episodio/" +
-      epMatch[1] +
-      "-temporada-" +
-      Number(epMatch[2]) +
-      "-episodio-" +
-      Number(epMatch[3]);
-  } else {
-    var m = /^(m|s):([a-z0-9-]+)/i.exec(raw);
-    if (!m) return [];
-    var kind = m[1].toLowerCase() === "m" ? "movie" : "series";
-    var slug = m[2];
-    if (kind === "series" && season != null && episode != null) {
-      pageUrl =
-        SITE +
-        "/episodio/" +
-        slug +
-        "-temporada-" +
-        Number(season) +
-        "-episodio-" +
-        Number(episode);
-    } else if (kind === "movie") {
-      pageUrl = SITE + "/ver-pelicula/" + slug;
-    } else {
+  id = String(id || '').replace(/^magis:/, '');
+  if (!id || id === 'config' || id === 'error') return [];
+  try {
+    if (STATE.email && STATE.password) {
+      var lr = await login(STATE.email, STATE.password);
+      if (!lr.ok) {
+        log('login en getStreams falló', lr);
+      }
+    }
+    var r = await resolveChannel(id);
+    if (!r.ok) {
+      log('resolve fail', r);
       return [];
     }
-  }
-
-  try {
-    var html = await fetchText(pageUrl, { headers: { Referer: SITE + "/" } });
-    var servers = parseServers(html);
-    if (!servers.length) return [];
-
-    servers = preferLang(servers);
-
-    var streams = [];
-    for (var i = 0; i < servers.length; i++) {
-      var s = servers[i];
-      var lang = langLabel(s.lang);
-      var host = String(s.host || "server").replace(/\s+/g, " ").trim() || "Server";
-      var streamUrl = s.url;
-      var isHls = false;
-      var headers = {
-        "User-Agent": UA,
-        Referer: SITE + "/"
-      };
-
-      try {
-        if (streamUrl && streamUrl.indexOf("player.php") !== -1) {
-          var playerHtml = await fetchText(streamUrl, {
-            headers: { Referer: pageUrl, "User-Agent": UA }
-          });
-          var resolved = parsePlayer(playerHtml);
-          if (resolved) {
-            streamUrl = resolved;
-            isHls = /\.m3u8(\?|$)/i.test(resolved);
-            headers.Referer = streamUrl;
-          }
-        }
-      } catch (_) {}
-
-      if (!streamUrl) continue;
-
-      streams.push({
-        name: host + " · " + lang,
-        url: streamUrl,
-        quality: "auto",
-        language: lang,
-        provider: host,
-        isHls: isHls,
-        headers: headers
-      });
-    }
-
-    return streams;
-  } catch (_) {
+    var d = r.data;
+    return [
+      {
+        url: d.url,
+        name: 'Magis Live · ' + id,
+        quality: 'HD',
+        language: 'es',
+        provider: 'magis',
+        isHls: true,
+        headers: d.headers,
+        // behaviorHints estilo Stremio por si el player los usa
+        behaviorHints: {
+          notWebReady: true,
+          proxyHeaders: {
+            request: d.headers,
+          },
+        },
+      },
+    ];
+  } catch (e) {
+    log('getStreams', e);
     return [];
   }
 }
 
-// CommonJS export (requerido por loadAddonCode / callMethod de la app)
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = {
-    getHome: getHome,
-    getNews: getNews,
-    getAds: getAds,
-    getDiscoverFilters: getDiscoverFilters,
-    getDiscover: getDiscover,
-    getCatalogs: getCatalogs,
-    getCatalog: getCatalog,
-    search: search,
-    getMeta: getMeta,
-    getStreams: getStreams
-  };
+async function getDiscover() {
+  return getHome();
 }
 
-if (typeof globalThis !== "undefined") {
-  globalThis.getHome = getHome;
-  globalThis.getNews = getNews;
-  globalThis.getAds = getAds;
-  globalThis.getDiscoverFilters = getDiscoverFilters;
-  globalThis.getDiscover = getDiscover;
-  globalThis.getCatalogs = getCatalogs;
-  globalThis.getCatalog = getCatalog;
-  globalThis.search = search;
-  globalThis.getMeta = getMeta;
-  globalThis.getStreams = getStreams;
+async function getNews() {
+  return [];
 }
+
+// Export CommonJS (lo que espera el runtime de la app)
+module.exports = {
+  setConfig: setConfig,
+  getHome: getHome,
+  getDiscover: getDiscover,
+  search: search,
+  getMeta: getMeta,
+  getStreams: getStreams,
+  getNews: getNews,
+};
