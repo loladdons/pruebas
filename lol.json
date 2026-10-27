@@ -1,7 +1,7 @@
 {
   "id": "magis-live",
   "name": "Magis Live TV",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "TV en vivo Magis / Xuper. Solo requiere email y contraseña. Hosts y clave del portal van fijos en el código (igual que el lib original).",
   "author": "MagisLive",
   "logo": "https://i.imgur.com/8QKQqQq.png",

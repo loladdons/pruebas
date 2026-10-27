@@ -18,7 +18,7 @@
 // ─── Config / estado ───────────────────────────────────────────────────────
 var CFG = {
   desKeyHex: 'e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8',
-  hosts: ['bcdod.faolmbghu.com', 'osuhk.m3x8o50te.com'],
+  hosts: ['osuhk.m3x8o50te.com', 'oogoy.f30c96w8.com', 'bcdod.faolmbghu.com'],
   appId: 'com.android.msandroid',
   apkVersion: '49902',
   scheme: 'https',
@@ -476,27 +476,53 @@ async function ensureAnonymous() {
 }
 
 async function mintDevice() {
-  var r = await portalCall(
-    'v3/snToken',
-    {
-      loginType: '2',
-      appLanguage: 'en',
-      apkVersion: CFG.apkVersion,
-      sysVersion: CFG.spkgVer,
-      appId: CFG.appId,
-      hardwareInfo: 'ranchu',
-      model: 'sdk_gphone64_arm64',
-      product: 'sdk_gphone64_arm64',
-      cpu: 'arm64-v8a',
-      B29: '',
-      reserve1: '',
-      deviceToken: '',
-      sn: '',
-      drmId: '',
-      sdkVer: 36,
-    },
-    { baseFields: false }
-  );
+  function rndHex(n) {
+    var s = '';
+    for (var i = 0; i < n; i++) s += ((Math.random() * 256) | 0).toString(16).padLeft(2, '0');
+    return s;
+  }
+  // padLeft polyfill inline
+  if (!String.prototype.padLeft) {
+    // no-op if missing; we pad manually
+  }
+  function pad2(h) {
+    h = String(h);
+    return h.length < 2 ? '0' + h : h;
+  }
+  function rndHex2(n) {
+    var s = '';
+    for (var i = 0; i < n; i++) s += pad2(((Math.random() * 256) | 0).toString(16));
+    return s;
+  }
+  function rndMac() {
+    var p = [];
+    for (var i = 0; i < 6; i++) p.push(pad2(((Math.random() * 256) | 0).toString(16)));
+    return p.join(':');
+  }
+  var fp = {
+    androidId: rndHex2(8),
+    board: 'goldfish_arm64',
+    brand: 'google',
+    cpuAbi: 'arm64-v8a',
+    cpuId: rndHex2(8),
+    device: 'emu64a',
+    diskInfo: '8GB',
+    display: 'sdk_gphone64_arm64',
+    etheMac: rndMac(),
+    fingerprint:
+      'google/sdk_gphone64_arm64/emu64a:14/UE1A.230829.036/11228894:user/release-keys',
+    gatewayMac: rndMac(),
+    hardware: 'ranchu',
+    host: 'abfarm',
+    manufacturer: 'Google',
+    ramSize: '4GB',
+    romSize: '8GB',
+    serialNumber: rndHex2(8),
+    tags: 'release-keys',
+    verId: '',
+    wifiMac: rndMac(),
+  };
+  var r = await portalCall('v3/snToken', fp, { baseFields: false });
   if (!r.ok) return r;
   var snToken = String((r.data && r.data.snToken) || '').trim();
   if (!snToken) {
@@ -545,27 +571,48 @@ async function login(email, password) {
   if (!email || !password) {
     return { ok: false, code: 'auth', message: 'email y password requeridos' };
   }
-  // Asegurar dispositivo anónimo primero (como Kino)
+  // Como Dart/Kino: primero dispositivo anónimo (sn), luego v8/login SIN baseFields
   var anon = await ensureAnonymous();
-  if (!anon.ok && !STATE.sn) {
-    // seguir igual; algunos builds aceptan login sin sn
+  if (!anon.ok) {
+    log('anon antes de login:', anon.code, anon.message);
+    // seguir: a veces el portal acepta login con sn vacío
   }
   var passHash = md5Hex(password + CFG.passwordSalt);
-  var r = await portalCall('v8/login', {
-    email: email,
+  var bean = {
+    accountType: '2',
+    userName: email,
     password: passHash,
-    loginType: '1',
+    type: '1',
+    macAddr: CFG.fixedMac,
+    areaCode: '',
+    verificationCode: '',
+    verificationToken: '',
+    matadata: '',
+    signdata: '',
+    channel: 'default',
+  };
+  var r = await portalCall('v8/login', bean, {
+    baseFields: false,
+    sn: STATE.sn || '',
   });
-  if (!r.ok) return r;
+  if (!r.ok) {
+    return {
+      ok: false,
+      code: r.code || 'login',
+      message: r.message || 'login falló',
+    };
+  }
   var ut = String((r.data && r.data.userToken) || '').trim();
   if (!ut) {
     return { ok: false, code: 'login_sin_token', message: 'login sin userToken' };
   }
-  STATE.userId = String((r.data && r.data.userId) || STATE.userId);
+  STATE.userId = String((r.data && r.data.userId) || STATE.userId || '');
   STATE.userToken = ut;
-  STATE.jwtToken = String((r.data && r.data.jwtToken) || STATE.jwtToken);
+  STATE.jwtToken = String((r.data && r.data.jwtToken) || STATE.jwtToken || '');
+  if (r.data && r.data.sn) STATE.sn = String(r.data.sn);
   STATE.email = email;
   STATE.password = password;
+  log('login OK userId=', STATE.userId ? 'sí' : 'no', 'sn=', STATE.sn ? 'sí' : 'no');
   return { ok: true };
 }
 
@@ -908,6 +955,7 @@ async function getHome() {
     }
     var lr = await login(STATE.email, STATE.password);
     if (!lr.ok) {
+      var detail = [lr.code, lr.message].filter(Boolean).join(' — ');
       return [
         {
           title: 'Error de login',
@@ -915,8 +963,12 @@ async function getHome() {
             {
               id: 'magis:error',
               type: 'channel',
-              name: (lr.code || '') + ': ' + (lr.message || 'login falló'),
+              name: detail || 'login falló',
               poster: null,
+              description:
+                'Revisa email/contraseña. Hosts: ' +
+                CFG.hosts.join(', ') +
+                '. Si el portal cambió de clave 3DES, avisa.',
             },
           ],
         },
