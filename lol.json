@@ -1,45 +1,15 @@
 {
   "id": "iptv.m3u.live",
   "name": "IPTV M3U Live",
-  "version": "1.0.0",
-  "description": "Canales en vivo desde lista M3U. Agrupa por group-title. Usa el player de canales de la app.",
+  "version": "1.0.1",
+  "description": "Canales en vivo desde lista M3U. Agrupa por group-title.",
   "author": "loladdons",
   "logo": "https://raw.githubusercontent.com/ice-dev-x/kino-iptv-org-clean/main/icon.png",
   "repo": "local/iptv-m3u-live",
   "type": "tvchannel",
+   "entry": "plugin.js",
+  "main": "plugin.js",
   "topics": ["lol_tvchanel", "iptv", "live", "m3u"],
   "capabilities": ["home", "search", "meta", "streams", "live", "channel", "iptv"],
-  "config": [
-    {
-      "key": "m3u_url",
-      "label": "URL de la lista M3U",
-      "type": "url",
-      "default": "https://raw.githubusercontent.com/nicor1029/Argentina/refs/heads/main/arglo.m3u",
-      "placeholder": "https://…/lista.m3u",
-      "required": true,
-      "description": "Enlace directo al archivo .m3u / .m3u8 de canales"
-    },
-    {
-      "key": "user_agent",
-      "label": "User-Agent",
-      "type": "text",
-      "default": "VLC/3.0.16 LibVLC/3.0.16",
-      "description": "User-Agent HTTP al pedir la lista y al reproducir"
-    },
-    {
-      "key": "cache_minutes",
-      "label": "Caché (minutos)",
-      "type": "number",
-      "default": "5",
-      "description": "Minutos que se reutiliza la lista en memoria"
-    },
-    {
-      "key": "referer",
-      "label": "Referer (opcional)",
-      "type": "text",
-      "default": "",
-      "placeholder": "https://ejemplo.com/",
-      "description": "Header Referer si el origen lo exige"
-    }
-  ]
+  "config": []
 }
