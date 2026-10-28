@@ -1,74 +1,74 @@
-/**
- * IPTV M3U Live — plugin para Lol+
- * - getHome: filas por group-title, items type=channel
- * - getStreams: URL del canal + headers
- * - search / getMeta
- *
- * Config (userConfig / lol.json config):
- *   m3u_url, user_agent, cache_minutes, referer
- */
+var DEFAULT_M3U_URL = 'https://raw.githubusercontent.com/nicor1029/Argentina/refs/heads/main/arglo.m3u';
+var DEFAULT_UA = 'VLC/3.0.16 LibVLC/3.0.16';
+var DEFAULT_CACHE_MIN = 5;
 
 var __m3uCache = { url: '', at: 0, channels: [] };
 
 function _cfg(ctx) {
-  var c = (ctx && (ctx.config || ctx.userConfig || ctx.settings)) || {};
-  if (typeof c === 'string') {
-    try { c = JSON.parse(c); } catch (_) { c = {}; }
+  var c = {};
+  if (ctx) {
+    if (ctx.config) c = ctx.config;
+    else if (ctx.userConfig) c = ctx.userConfig;
+    else if (ctx.settings) c = ctx.settings;
   }
-  return c || {};
+  if (typeof c === 'string') {
+    try { c = JSON.parse(c); } catch (e) { c = {}; }
+  }
+  if (!c || typeof c !== 'object') c = {};
+  return c;
 }
 
 function _str(v, d) {
-  if (v == null || v === '') return d == null ? '' : String(d);
+  if (v === null || v === undefined || v === '') return d;
   return String(v);
 }
 
 function _num(v, d) {
   var n = parseInt(v, 10);
-  return isNaN(n) ? d : n;
+  if (isNaN(n)) return d;
+  return n;
 }
 
 function _headers(cfg) {
-  var h = {
-    'User-Agent': _str(cfg.user_agent, 'VLC/3.0.16 LibVLC/3.0.16'),
+  return {
+    'User-Agent': _str(cfg.user_agent, DEFAULT_UA),
     'Accept': '*/*',
     'Connection': 'keep-alive'
   };
-  var ref = _str(cfg.referer, '').trim();
-  if (ref) h['Referer'] = ref;
-  return h;
 }
 
 function _slug(s) {
   return String(s || '')
     .toLowerCase()
-    .replace(/[^a-z0-9áéíóúñü]+/gi, '-')
+    .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 80) || 'ch';
+    .substring(0, 80) || 'ch';
 }
 
 function _attr(line, name) {
-  // tvg-logo="..." o group-title="..."
   var re = new RegExp(name + '="([^"]*)"', 'i');
   var m = line.match(re);
   if (m) return m[1];
-  re = new RegExp(name + "=([^,\\s]+)", 'i');
+  re = new RegExp(name + '=([^,\\s]+)', 'i');
   m = line.match(re);
-  return m ? m[1] : '';
+  if (m) return m[1];
+  return '';
 }
 
 function _titleFromExtinf(line) {
-  // Tras la última coma
   var i = line.lastIndexOf(',');
   if (i < 0) return 'Canal';
-  var t = line.slice(i + 1).trim();
+  var t = line.substring(i + 1).trim();
   return t || 'Canal';
 }
 
 function _isUrl(line) {
   var s = String(line || '').trim();
-  if (!s || s[0] === '#') return false;
-  return /^(https?:)?\/\//i.test(s) || /^rtmp:\/\//i.test(s) || /^udp:\/\//i.test(s);
+  if (!s || s.charAt(0) === '#') return false;
+  if (/^https?:\/\//i.test(s)) return true;
+  if (/^rtmp:\/\//i.test(s)) return true;
+  if (/^udp:\/\//i.test(s)) return true;
+  return false;
 }
 
 function _parseM3U(text) {
@@ -83,13 +83,12 @@ function _parseM3U(text) {
       urlBuf = '';
       return;
     }
-    var u = url.trim();
-    // Completar URLs relativas rotas (línea partida)
+    var u = String(url).trim();
     if (urlBuf) {
       u = (urlBuf + u).replace(/\s+/g, '');
       urlBuf = '';
     }
-    if (!_isUrl(u) && !/^https?:/i.test(u)) {
+    if (!_isUrl(u)) {
       pending = null;
       return;
     }
@@ -126,64 +125,53 @@ function _parseM3U(text) {
       continue;
     }
 
-    if (line[0] === '#') continue;
+    if (line.charAt(0) === '#') continue;
 
-    // URL (puede venir partida en 2 líneas en listas mal formadas)
     if (pending) {
-      if (_isUrl(line) || /^[a-z0-9]/./?&=%+~-]+$/i.test(line)) {
-        // Si parece URL incompleta sin protocolo y no hay pending url aún
-        if (!_isUrl(line) && line.indexOf('http') !== 0) {
-          // ¿continuación de URL anterior?
-          if (urlBuf) {
-            flushUrl(urlBuf + line);
-          } else if (line.indexOf('/') >= 0 || line.indexOf('.m3u') >= 0) {
-            // a veces la URL empieza en la línea anterior cortada; ignorar basura
-            urlBuf = line;
-          }
-        } else {
-          flushUrl(line);
-        }
+      if (_isUrl(line)) {
+        flushUrl(line);
+      } else if (urlBuf) {
+        flushUrl(urlBuf + line);
+      } else if (line.indexOf('/') >= 0 || line.indexOf('.m3u') >= 0) {
+        urlBuf = line;
       }
     }
   }
   if (pending && urlBuf) flushUrl(urlBuf);
-
   return channels;
 }
 
-async function _loadChannels(ctx) {
+function _loadChannels(ctx) {
   var cfg = _cfg(ctx);
-  var url = _str(cfg.m3u_url, '').trim();
-  if (!url) {
-    throw new Error('Configura m3u_url en Ajustes del repo');
-  }
-  var cacheMin = _num(cfg.cache_minutes, 5);
+  var url = _str(cfg.m3u_url, DEFAULT_M3U_URL).trim();
+  if (!url) url = DEFAULT_M3U_URL;
+
+  var cacheMin = _num(cfg.cache_minutes, DEFAULT_CACHE_MIN);
   var now = Date.now();
-  if (__m3uCache.url === url && __m3uCache.channels.length &&
+  if (__m3uCache.url === url && __m3uCache.channels.length > 0 &&
       (now - __m3uCache.at) < cacheMin * 60 * 1000) {
-    return __m3uCache.channels;
+    return Promise.resolve(__m3uCache.channels);
   }
 
-  var res = await fetch(url, {
+  return fetch(url, {
     method: 'GET',
     headers: _headers(cfg)
-  });
-  if (!res.ok) {
-    throw new Error('HTTP ' + res.status + ' al descargar M3U');
-  }
-  var text = await res.text();
-  if (!text || text.indexOf('#EXT') < 0) {
-    // Algunas listas no traen cabecera pero sí EXTINF
-    if (!text || text.indexOf('#EXTINF') < 0) {
-      throw new Error('La URL no parece una lista M3U válida');
+  }).then(function (res) {
+    if (!res.ok) {
+      throw new Error('HTTP ' + res.status + ' al descargar M3U');
     }
-  }
-  var channels = _parseM3U(text);
-  if (!channels.length) {
-    throw new Error('No se encontraron canales en la lista');
-  }
-  __m3uCache = { url: url, at: now, channels: channels };
-  return channels;
+    return res.text();
+  }).then(function (text) {
+    if (!text || (text.indexOf('#EXTINF') < 0 && text.indexOf('#EXT') < 0)) {
+      throw new Error('La URL no parece una lista M3U valida');
+    }
+    var channels = _parseM3U(text);
+    if (!channels.length) {
+      throw new Error('No se encontraron canales en la lista');
+    }
+    __m3uCache = { url: url, at: Date.now(), channels: channels };
+    return channels;
+  });
 }
 
 function _item(ch) {
@@ -206,8 +194,9 @@ function _item(ch) {
 function _groupRows(channels) {
   var map = {};
   var order = [];
-  for (var i = 0; i < channels.length; i++) {
-    var g = channels[i].group || 'Otros';
+  var i, g, name, j;
+  for (i = 0; i < channels.length; i++) {
+    g = channels[i].group || 'Otros';
     if (!map[g]) {
       map[g] = [];
       order.push(g);
@@ -215,8 +204,11 @@ function _groupRows(channels) {
     map[g].push(_item(channels[i]));
   }
   var rows = [];
-  // Fila destacada con los primeros
-  var heroItems = channels.slice(0, Math.min(12, channels.length)).map(_item);
+  var heroItems = [];
+  var limit = channels.length < 12 ? channels.length : 12;
+  for (i = 0; i < limit; i++) {
+    heroItems.push(_item(channels[i]));
+  }
   if (heroItems.length) {
     rows.push({
       id: 'hero_live',
@@ -225,8 +217,8 @@ function _groupRows(channels) {
       items: heroItems
     });
   }
-  for (var j = 0; j < order.length; j++) {
-    var name = order[j];
+  for (j = 0; j < order.length; j++) {
+    name = order[j];
     rows.push({
       id: 'grp_' + _slug(name),
       title: name,
@@ -237,47 +229,49 @@ function _groupRows(channels) {
   return rows;
 }
 
-async function getHome(ctx) {
-  var channels = await _loadChannels(ctx || {});
-  return { rows: _groupRows(channels) };
+function getHome(ctx) {
+  return _loadChannels(ctx || {}).then(function (channels) {
+    return { rows: _groupRows(channels) };
+  });
 }
 
-async function search(ctx, query) {
+function search(ctx, query) {
   var q = _str(query, '').trim().toLowerCase();
-  if (!q) return { items: [] };
-  var channels = await _loadChannels(ctx || {});
-  var items = [];
-  for (var i = 0; i < channels.length; i++) {
-    var ch = channels[i];
-    var hay = (ch.title + ' ' + ch.group + ' ' + (ch.tvgId || '')).toLowerCase();
-    if (hay.indexOf(q) >= 0) items.push(_item(ch));
-  }
-  return { items: items };
-}
-
-async function getMeta(ctx, id) {
-  var channels = await _loadChannels(ctx || {});
-  for (var i = 0; i < channels.length; i++) {
-    if (channels[i].id === id) {
+  if (!q) return Promise.resolve({ items: [] });
+  return _loadChannels(ctx || {}).then(function (channels) {
+    var items = [];
+    for (var i = 0; i < channels.length; i++) {
       var ch = channels[i];
-      return {
-        item: {
-          id: ch.id,
-          title: ch.title,
-          poster: ch.poster || ch.logo,
-          logo: ch.logo || ch.poster,
-          type: 'channel',
-          overview: 'Canal en vivo · ' + (ch.group || ''),
-          extra: { group: ch.group, streamUrl: ch.url }
-        }
-      };
+      var hay = (ch.title + ' ' + ch.group + ' ' + (ch.tvgId || '')).toLowerCase();
+      if (hay.indexOf(q) >= 0) items.push(_item(ch));
     }
-  }
-  return { item: { id: id, title: id, type: 'channel' } };
+    return { items: items };
+  });
 }
 
-async function getStreams(id, type, season, episode, ctx) {
-  // Firma flexible: getStreams(id) | getStreams(id,type,...) | getStreams({id})
+function getMeta(ctx, id) {
+  return _loadChannels(ctx || {}).then(function (channels) {
+    for (var i = 0; i < channels.length; i++) {
+      if (channels[i].id === id) {
+        var ch = channels[i];
+        return {
+          item: {
+            id: ch.id,
+            title: ch.title,
+            poster: ch.poster || ch.logo,
+            logo: ch.logo || ch.poster,
+            type: 'channel',
+            overview: 'Canal en vivo - ' + (ch.group || ''),
+            extra: { group: ch.group, streamUrl: ch.url }
+          }
+        };
+      }
+    }
+    return { item: { id: id, title: id, type: 'channel' } };
+  });
+}
+
+function getStreams(id, type, season, episode, ctx) {
   var ctxObj = ctx;
   var channelId = id;
   if (id && typeof id === 'object') {
@@ -286,42 +280,42 @@ async function getStreams(id, type, season, episode, ctx) {
   }
   if (type && typeof type === 'object' && !ctxObj) ctxObj = type;
 
-  var channels = await _loadChannels(ctxObj || {});
-  var ch = null;
-  for (var i = 0; i < channels.length; i++) {
-    if (channels[i].id === channelId) {
-      ch = channels[i];
-      break;
-    }
-  }
-  // Fallback: id puede ser la propia URL
-  if (!ch && channelId && /^https?:/i.test(String(channelId))) {
-    ch = { title: 'Directo', url: channelId, group: 'Live' };
-  }
-  if (!ch) return { streams: [] };
-
-  var cfg = _cfg(ctxObj || {});
-  var headers = _headers(cfg);
-  var url = ch.url;
-  var isHls = /\.m3u8(\?|$)/i.test(url) || /mpegurl/i.test(url);
-
-  return {
-    streams: [
-      {
-        name: ch.group ? (ch.group + ' · Principal') : 'Principal',
-        title: ch.title || 'Live',
-        url: url,
-        quality: isHls ? 'HLS' : 'Live',
-        language: 'Live',
-        provider: 'M3U',
-        isHls: isHls,
-        headers: headers
+  return _loadChannels(ctxObj || {}).then(function (channels) {
+    var ch = null;
+    var i;
+    for (i = 0; i < channels.length; i++) {
+      if (channels[i].id === channelId) {
+        ch = channels[i];
+        break;
       }
-    ]
-  };
+    }
+    if (!ch && channelId && /^https?:/i.test(String(channelId))) {
+      ch = { title: 'Directo', url: channelId, group: 'Live' };
+    }
+    if (!ch) return { streams: [] };
+
+    var cfg = _cfg(ctxObj || {});
+    var headers = _headers(cfg);
+    var url = ch.url;
+    var isHls = /\.m3u8(\?|$)/i.test(url) || /mpegurl/i.test(url);
+
+    return {
+      streams: [
+        {
+          name: ch.group ? (ch.group + ' - Principal') : 'Principal',
+          title: ch.title || 'Live',
+          url: url,
+          quality: isHls ? 'HLS' : 'Live',
+          language: 'Live',
+          provider: 'M3U',
+          isHls: isHls,
+          headers: headers
+        }
+      ]
+    };
+  });
 }
 
-// Export CommonJS (flutter_js)
 module.exports = {
   getHome: getHome,
   search: search,
