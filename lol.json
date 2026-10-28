@@ -1,53 +1,45 @@
 {
-  "id": "magis-live",
-  "name": "Magis Live TV",
-  "version": "1.1.0",
-  "description": "TV en vivo Magis / Xuper. Solo requiere email y contraseña. Hosts y clave del portal van fijos en el código (igual que el lib original).",
-  "author": "MagisLive",
-  "logo": "https://i.imgur.com/8QKQqQq.png",
-  "icon": "https://i.imgur.com/8QKQqQq.png",
-  "banner": "",
-  "types": [
-    "live",
-    "tv",
-    "channel"
-  ],
-  "entry": "plugin.js",
-  "resources": [
-    "catalog",
-    "meta",
-    "stream"
-  ],
-  "idPrefixes": [
-    "magis:"
-  ],
+  "id": "iptv.m3u.live",
+  "name": "IPTV M3U Live",
+  "version": "1.0.0",
+  "description": "Canales en vivo desde lista M3U. Agrupa por group-title. Usa el player de canales de la app.",
+  "author": "loladdons",
+  "logo": "https://raw.githubusercontent.com/ice-dev-x/kino-iptv-org-clean/main/icon.png",
+  "repo": "local/iptv-m3u-live",
+  "type": "tvchannel",
+  "topics": ["lol_tvchanel", "iptv", "live", "m3u"],
+  "capabilities": ["home", "search", "meta", "streams", "live", "channel", "iptv"],
   "config": [
     {
-      "key": "email",
-      "label": "Email / Usuario Magis",
-      "type": "text",
+      "key": "m3u_url",
+      "label": "URL de la lista M3U",
+      "type": "url",
+      "default": "https://raw.githubusercontent.com/nicor1029/Argentina/refs/heads/main/arglo.m3u",
+      "placeholder": "https://…/lista.m3u",
       "required": true,
-      "placeholder": "tu@email.com",
-      "description": "Cuenta Magis/Xuper"
+      "description": "Enlace directo al archivo .m3u / .m3u8 de canales"
     },
     {
-      "key": "password",
-      "label": "Contraseña",
-      "type": "password",
-      "required": true,
-      "placeholder": "••••••••",
-      "description": "Se guarda solo en este dispositivo"
+      "key": "user_agent",
+      "label": "User-Agent",
+      "type": "text",
+      "default": "VLC/3.0.16 LibVLC/3.0.16",
+      "description": "User-Agent HTTP al pedir la lista y al reproducir"
+    },
+    {
+      "key": "cache_minutes",
+      "label": "Caché (minutos)",
+      "type": "number",
+      "default": "5",
+      "description": "Minutos que se reutiliza la lista en memoria"
+    },
+    {
+      "key": "referer",
+      "label": "Referer (opcional)",
+      "type": "text",
+      "default": "",
+      "placeholder": "https://ejemplo.com/",
+      "description": "Header Referer si el origen lo exige"
     }
-  ],
-  "theme": {
-    "accent": "#E53935",
-    "onAccent": "#FFFFFF",
-    "background": "#0D0D0D",
-    "surface": "#1A1A1A"
-  },
-  "categories": [
-    "Live",
-    "TV"
-  ],
-  "language": "es"
+  ]
 }
