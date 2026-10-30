@@ -1,632 +1,1798 @@
-// @ts-check
-// Fútbol Libre — adaptado para Nuvio / Mi Comunidad (lolplus)
-// API esperada por la app: getHome, search, getStreams
-// Canales / partidos: type "channel" | "live" → player en vivo sin barra de progreso
-//
-// Sitios (orden de intento):
-//   primary   futbollibretvplus.com   agenda: api.wqxag.com/diaries.json
-//   backup 1  futbolvivo.site         agenda: /api/agenda
-//   backup 2  futbol-libre.app        agenda: /agenda (HTML), playback: /api/direct-playback.php
+const YT_API_BASE = "https://www.googleapis.com/youtube/v3";
+const YT_INNERTUBE_BASE = "https://www.youtube.com/youtubei/v1";
+const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
-// ---- textos ----
-const TEXTS = {
-  es: {
-    now: "En vivo ahora",
-    next: "Próximos partidos",
-    channels: "Canales deportivos",
-    more: "Más canales",
-    live: "EN VIVO",
-    offline: "Sin señal por ahora. Si el partido aún no empieza, vuelve en un rato.",
-    unavailable: "Ningún servidor responde ahora. Intenta de nuevo en un momento.",
-  },
-  en: {
-    now: "Live now",
-    next: "Upcoming matches",
-    channels: "Sports channels",
-    more: "More channels",
-    live: "LIVE",
-    offline: "No signal right now. If the match has not started, try later.",
-    unavailable: "No server answers right now. Try again in a moment.",
-  },
-};
+/**
+ * Plan B - Instancias de respaldo automático de Invidious y Piped
+ * en caso de limitaciones o fallos de YouTube directo.
+ */
+const INVIDIOUS_MIRRORS = [
+  "https://invidious.nerdvpn.de",
+  "https://inv.nadeko.net",
+  "https://invidious.tiekoetter.com"
+];
 
-function t(key) {
-  const lang = (typeof navigator !== "undefined" && navigator.language || "es").toLowerCase().startsWith("es") ? "es" : "en";
-  return (TEXTS[lang] && TEXTS[lang][key]) || TEXTS.es[key] || key;
-}
+const PIPED_INSTANCES = [
+  "https://cf.piped.video",
+  "https://pipedapi.ducks.party",
+  "https://piped.ducks.party",
+  "https://pipedapi.kavin.rocks",
+  "https://piped.kavin.rocks",
+  "https://pipedapi.wireway.ch",
+  "https://piped.wireway.ch"
+];
 
-// ---- sitios ----
-const PRIMARY = "https://futbollibretvplus.com";
-const BACKUP1 = "https://futbolvivo.site";
-const BACKUP2 = "https://futbol-libre.app";
-const AGENDA_API = "https://api.wqxag.com/diaries.json";
-const IMG = "https://img.wqxag.com";
-const HOUR = 3600000;
-const MATCH_MS = 150 * 60000; // 2h 30 después del inicio cuenta como en vivo
-const MEM = new Map();
+const HOME_CATEGORIES = [
+  { id: "trending", title: "Tendencias en YouTube", ref: "cat:trending", query: "tendencias tecnologia musica cine", genre: "entretenimiento" },
+  { id: "music", title: "Música y Conciertos", ref: "cat:music", query: "official music video live concert", videoCategoryId: "10", genre: "musica" },
+  { id: "documentaries", title: "Documentales y Ciencia", ref: "cat:documentaries", query: "documental completo espanol ciencia historia", genre: "documentales" },
+  { id: "movies", title: "Películas y Cortometrajes", ref: "cat:movies", query: "pelicula completa dominio publico cortometraje", genre: "peliculas" },
+  { id: "playlists", title: "Listas de Reproducción Destacadas", ref: "cat:playlists", query: "curso completo documental serie playlist", searchType: "playlist", genre: "series" },
+  { id: "channels", title: "Canales Destacados", ref: "cat:channels", query: "canal oficial ciencia historia musica", searchType: "channel", genre: "otros" }
+];
 
-async function cached(key, ttlMs, fn) {
-  const hit = MEM.get(key);
-  if (hit && Date.now() - hit.at < ttlMs) return hit.v;
-  const v = await fn();
-  MEM.set(key, { at: Date.now(), v });
-  return v;
-}
-
-function offsetHours() {
-  // La app pasa config en globalThis.__nuvioConfig.current (o por addonId)
+function __readCfg(key, def) {
   try {
-    const cfg =
-      (globalThis.__nuvioConfig && (globalThis.__nuvioConfig.current || globalThis.__nuvioConfig)) ||
-      {};
-    if (cfg.utcOffset != null) {
-      const n = parseInt(String(cfg.utcOffset), 10);
-      if (Number.isFinite(n)) return n;
+    if (typeof config !== "undefined" && config && config[key] != null) return config[key];
+    if (typeof userConfig !== "undefined" && userConfig && userConfig[key] != null) return userConfig[key];
+    if (typeof kino !== "undefined" && kino && kino.config && kino.config[key] != null) return kino.config[key];
+  } catch (e) {}
+  return def;
+}
+
+function getRegionCode() {
+  const raw = String(__readCfg("region_code", "") || "").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(raw) ? raw : "MX";
+}
+
+function getPreferredLang() {
+  const raw = String(__readCfg("preferred_lang", "") || "").trim().toLowerCase();
+  return /^[a-z]{2}(-[a-z0-9]+)?$/i.test(raw) ? raw : "es";
+}
+
+async function getAuthCredentials() {
+  const userApiKey = String(__readCfg("api_key", "") || "").trim();
+  // En Nuvio no hay kino.secret / kino.storage; solo API key del usuario en ajustes del repo
+  return {
+    apiKey: userApiKey,
+    sealedKey: "",
+    clientId: "",
+    clientSecret: "",
+    accessToken: ""
+  };
+}
+
+async function refreshOAuthToken(refreshToken, clientId, clientSecret) {
+  try {
+    const body = new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token"
+    }).toString();
+
+    const res = await fetch(OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    });
+    if (!res.ok) return "";
+    const data = await res.json();
+    if (data && data.access_token) {
+      const ttlMs = (Number(data.expires_in) || 3600) * 1000;
+      await (async()=>{})("yt_access_token", data.access_token);
+      await (async()=>{})("yt_token_expires_at", String(Date.now() + ttlMs));
+      return String(data.access_token);
     }
-  } catch (_) {}
-  return -5;
-}
-
-function pad(n) {
-  return n < 10 ? "0" + n : String(n);
-}
-
-function clock(ms) {
-  const d = new Date(ms + offsetHours() * HOUR);
-  return pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes());
-}
-
-function whenText(ms) {
-  const shift = offsetHours() * HOUR;
-  const d = new Date(ms + shift);
-  const today = new Date(Date.now() + shift);
-  const same =
-    d.getUTCFullYear() === today.getUTCFullYear() &&
-    d.getUTCMonth() === today.getUTCMonth() &&
-    d.getUTCDate() === today.getUTCDate();
-  const days = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
-  return same ? clock(ms) : days[d.getUTCDay()] + " " + clock(ms);
-}
-
-// ---- utils ----
-function entities(s) {
-  return String(s || "")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#0?39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function hash(s) {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(36);
-}
-
-function b64(s) {
-  let x = String(s).replace(/-/g, "+").replace(/_/g, "/");
-  while (x.length % 4) x += "=";
-  try {
-    return atob(x);
-  } catch {
-    return "";
+  } catch (err) {
+    console.log("Error renovando token OAuth:", String(err));
   }
-}
-
-function tokenOf(url) {
-  const u = String(url || "");
-  const id = (/[?&](?:stream|canal)=([A-Za-z0-9_-]{1,40})/.exec(u) || [])[1];
-  if (!id) return "";
-  if (/^https:\/\/(?:www\.)?tvf90\.com\//.test(u)) return "tvf90." + id;
-  if (/^https:\/\/(?:www\.)?la18hd\.su\/vivo\/canales\.php/.test(u)) return "la18c." + id;
-  if (/^https:\/\/(?:www\.)?la18hd\.su\//.test(u)) return "la18." + id;
-  if (/^https:\/\/streamxhd\.st\//.test(u)) return "sxhd." + id;
-  if (/^https:\/\/(?:futbollibretv\.sx|streamtp[a-z0-9.-]*)\//.test(u)) return "tp." + id;
   return "";
 }
 
-function withSisters(tokens) {
-  const out = [];
-  const add = (x) => {
-    if (x && !out.includes(x)) out.push(x);
-  };
-  tokens.forEach(add);
-  for (const x of tokens) {
-    const [kind, id] = x.split(".");
-    if (kind === "tvf90") add("la18." + id);
-    if (kind === "la18" || kind === "la18c") add("tvf90." + id);
+async function ytDataApiFetch(endpoint, params = {}) {
+  const creds = await getAuthCredentials();
+  const keyToTry = creds.apiKey || creds.sealedKey;
+  if (!keyToTry && !creds.accessToken) return null;
+
+  const query = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== "") {
+      query.set(k, String(v));
+    }
   }
-  return out.slice(0, 7);
-}
+  const headers = { "Accept": "application/json" };
+  if (creds.accessToken) {
+    headers["Authorization"] = `Bearer ${creds.accessToken}`;
+  } else if (keyToTry) {
+    query.set("key", keyToTry);
+  }
 
-function makeEvent(source, startMs, league, title, flag, tokens) {
-  const clean = withSisters(tokens);
-  if (!clean.length || !title || !(startMs > 0)) return null;
-  return {
-    id: "e" + hash(source === "backup2" ? title + startMs : title + "|" + startMs),
-    start: startMs,
-    league,
-    title,
-    flag,
-    tokens: clean,
-    source,
-  };
-}
-
-function limaMs(date, hour) {
-  const d = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(date));
-  const h = /^(\d{1,2}):(\d{2})/.exec(String(hour));
-  if (!d || !h) return 0;
-  return Date.UTC(+d[1], +d[2] - 1, +d[3], +h[1], +h[2]) + 5 * HOUR;
-}
-
-function splitTitle(raw) {
-  const text = entities(raw);
-  const m = /^([^:]{2,80}):\s*(.+)$/.exec(text);
-  return m ? { league: m[1].trim(), title: m[2].trim() } : { league: "", title: text };
-}
-
-// ---- agenda ----
-async function fetchText(url, timeoutMs) {
-  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs || 10000) : null;
+  const url = `${YT_API_BASE}/${endpoint}?${query.toString()}`;
   try {
-    const r = await fetch(url, {
-      signal: ctrl ? ctrl.signal : undefined,
-      headers: { "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36" },
-    });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    return await r.text();
-  } finally {
-    if (timer) clearTimeout(timer);
+    const res = await fetch(url, { headers });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && !data.error) return data;
+  } catch (err) {
+    console.log("Aviso en consulta Data API v3:", String(err));
   }
+  return null;
 }
 
-async function fetchJson(url, timeoutMs) {
-  const text = await fetchText(url, timeoutMs);
-  return JSON.parse(text);
-}
-
-async function agendaPrimary() {
-  const data = await fetchJson(AGENDA_API, 8000);
-  const rows = data && data.data;
-  if (!Array.isArray(rows)) throw new Error("agenda shape");
-  const out = [];
-  for (const row of rows) {
-    const a = (row && row.attributes) || {};
-    const { league, title } = splitTitle(a.diary_description);
-    const c = a.country && a.country.data && a.country.data.attributes;
-    const img = c && c.image && c.image.data && c.image.data.attributes && c.image.data.attributes.url;
-    const tokens = [];
-    for (const em of (a.embeds && a.embeds.data) || []) {
-      const frame = (em.attributes && em.attributes.embed_iframe) || "";
-      const m = /[?&]r=([^&]+)/.exec(frame);
-      const tok = tokenOf(m ? b64(decodeURIComponent(m[1])) : frame);
-      if (tok && !tokens.includes(tok)) tokens.push(tok);
-    }
-    const ev = makeEvent(
-      "primary",
-      limaMs(a.date_diary, a.diary_hour),
-      league || (c && c.name) || "",
-      title,
-      img ? IMG + img : undefined,
-      tokens
-    );
-    if (ev) out.push(ev);
-  }
-  return out;
-}
-
-async function agendaBackup1() {
-  const data = await fetchJson(BACKUP1 + "/api/agenda", 8000);
-  const events = data && data.events;
-  if (!Array.isArray(events)) throw new Error("agenda shape");
-  const out = [];
-  for (const e of events) {
-    const { league, title } = splitTitle(e.title);
-    const tokens = [];
-    for (const em of e.embeds || []) {
-      const tok = tokenOf(em.iframe);
-      if (tok && !tokens.includes(tok)) tokens.push(tok);
-    }
-    const ev = makeEvent(
-      "backup1",
-      limaMs(e.date, e.time),
-      league,
-      title,
-      typeof e.flag === "string" && /^https:/.test(e.flag) ? e.flag : undefined,
-      tokens
-    );
-    if (ev) out.push(ev);
-  }
-  return out;
-}
-
-async function agendaBackup2() {
-  const html = await fetchText(BACKUP2 + "/agenda", 9000);
-  const out = [];
-  for (const chunk of html.split('<div class="source-agenda-event"').slice(1)) {
-    const instant = Date.parse((/data-source-instant="([^"]+)"/.exec(chunk) || [])[1] || "");
-    const comp = entities((/source-agenda-competition">([^<]*)</.exec(chunk) || [])[1] || "").replace(/:$/, "");
-    const strong = entities(((/<strong>([\s\S]*?)<\/strong>/.exec(chunk) || [])[1] || "").replace(/<[^>]+>/g, " "));
-    const title = comp && strong.startsWith(comp) ? strong.slice(comp.length).replace(/^[:\s]+/, "") : strong;
-    const flagPath = (/source-agenda-flag" src="([^"]+)"/.exec(chunk) || [])[1];
-    const tokens = [];
-    const re = /href="\/match\/([a-z0-9-]{1,100})#source=(\d{1,8})"/g;
-    let m;
-    while ((m = re.exec(chunk))) tokens.push(`b2e.${m[1]}.${m[2]}`);
-    const ev = makeEvent(
-      "backup2",
-      instant,
-      comp,
-      title,
-      flagPath ? BACKUP2 + flagPath : undefined,
-      tokens.slice(0, 7)
-    );
-    if (ev) out.push(ev);
-  }
-  return out;
-}
-
-function upcoming(list) {
-  const now = Date.now();
-  return list.filter((e) => e.start + 3 * HOUR > now).sort((a, b) => a.start - b.start);
-}
-
-const AGENDA_SITES = [
-  ["primary", agendaPrimary, 0],
-  ["backup1", agendaBackup1, 2500],
-  ["backup2", agendaBackup2, 4500],
-];
-
-async function loadAgenda() {
-  let resolved = null;
-  const promises = AGENDA_SITES.map(([name, fn, delay]) =>
-    (async () => {
-      if (delay) await new Promise((r) => setTimeout(r, delay));
-      try {
-        const kept = upcoming(await fn());
-        if (kept.length && !resolved) {
-          resolved = kept;
-          return kept;
-        }
-        return kept;
-      } catch (e) {
-        return [];
+async function ytInnertubeFetch(endpoint, payload) {
+  const region = getRegionCode();
+  const prefLang = getPreferredLang();
+  const body = {
+    context: {
+      client: {
+        clientName: "WEB",
+        clientVersion: "2.20250101.00.00",
+        hl: prefLang,
+        gl: region
       }
-    })()
-  );
-  // Espera la primera que tenga partidos, o todas si ninguna responde
-  await Promise.race([
-    Promise.all(promises).then((lists) => {
-      if (!resolved) {
-        for (const list of lists) {
-          if (list && list.length) {
-            resolved = list;
-            break;
+    },
+    ...payload
+  };
+  const res = await fetch(`${YT_INNERTUBE_BASE}/${endpoint}?prettyPrint=false`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    throw new Error(`Error HTTP ${res.status} al consultar YouTube`);
+  }
+  return await res.json();
+}
+
+function selectThumbnail(thumbnails, videoId = "") {
+  if (thumbnails && typeof thumbnails === "object") {
+    if (Array.isArray(thumbnails)) {
+      const sorted = [...thumbnails].filter(t => t && t.url);
+      if (sorted.length > 0) {
+        let rawUrl = sorted[sorted.length - 1].url;
+        if (rawUrl.startsWith("//")) rawUrl = "https:" + rawUrl;
+        return rawUrl;
+      }
+    } else {
+      const order = ["maxres", "standard", "high", "medium", "default"];
+      for (const k of order) {
+        if (thumbnails[k] && thumbnails[k].url) {
+          let rawUrl = thumbnails[k].url;
+          if (rawUrl.startsWith("//")) rawUrl = "https:" + rawUrl;
+          return rawUrl;
+        }
+      }
+    }
+  }
+  if (videoId) {
+    return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+  }
+  return "https://www.youtube.com/img/desktop/yt_1200.png";
+}
+
+function mapDataApiItem(raw) {
+  if (!raw) return null;
+  const snippet = raw.snippet || {};
+  const rawKind = typeof raw.id === "string" ? (raw.kind || "") : (raw.id && raw.id.kind ? raw.id.kind : "");
+
+  if (rawKind.includes("playlist") || (raw.id && raw.id.playlistId)) {
+    const playlistId = typeof raw.id === "string" ? raw.id : raw.id.playlistId;
+    if (!playlistId) return null;
+    const poster = selectThumbnail(snippet.thumbnails);
+    return {
+      id: `yt-pl-${playlistId}`,
+      ref: `playlist:${playlistId}`,
+      title: snippet.title || "Lista de reproducción",
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: snippet.description || (snippet.channelTitle ? `Canal: ${snippet.channelTitle}` : "Lista de reproducción de YouTube")
+    };
+  }
+
+  if (rawKind.includes("channel") || (raw.id && raw.id.channelId)) {
+    const channelId = typeof raw.id === "string" ? raw.id : raw.id.channelId;
+    if (!channelId) return null;
+    const poster = selectThumbnail(snippet.thumbnails);
+    return {
+      id: `yt-ch-${channelId}`,
+      ref: `channel:${channelId}`,
+      title: snippet.title || snippet.channelTitle || "Canal de YouTube",
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: snippet.description || "Canal público de YouTube"
+    };
+  }
+
+  const videoId = typeof raw.id === "string"
+    ? raw.id
+    : (raw.id && raw.id.videoId) || (snippet.resourceId && snippet.resourceId.videoId) || "";
+  if (!videoId) return null;
+
+  const isLive = snippet.liveBroadcastContent === "live";
+  const poster = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+  const backdrop = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
+  const year = snippet.publishedAt ? String(snippet.publishedAt).slice(0, 4) : undefined;
+
+  return {
+    id: `yt-v-${videoId}`,
+    ref: `video:${videoId}`,
+    title: snippet.title || `Video ${videoId}`,
+    kind: isLive ? "live" : "movie",
+    year: year && /^\d{4}$/.test(year) ? year : undefined,
+    poster,
+    backdrop,
+    overview: snippet.description || (snippet.channelTitle ? `Canal: ${snippet.channelTitle}` : "")
+  };
+}
+
+function extractText(node) {
+  if (!node) return "";
+  if (typeof node === "string") return node;
+  if (typeof node.simpleText === "string") return node.simpleText;
+  if (Array.isArray(node.runs)) return node.runs.map(r => r.text || "").join("");
+  return "";
+}
+
+function collectInnertubeRenderers(root, out = [], depth = 0) {
+  if (!root || typeof root !== "object" || depth > 40 || out.length >= 45) return out;
+  if (root.videoRenderer && root.videoRenderer.videoId) {
+    out.push({ type: "video", data: root.videoRenderer });
+    return out;
+  }
+  if (root.playlistvideoRenderer && root.playlistvideoRenderer.videoId) {
+    out.push({ type: "video", data: root.playlistvideoRenderer });
+    return out;
+  }
+  if (root.playlistVideoRenderer && root.playlistVideoRenderer.videoId) {
+    out.push({ type: "video", data: root.playlistVideoRenderer });
+    return out;
+  }
+  if (root.gridVideoRenderer && root.gridVideoRenderer.videoId) {
+    out.push({ type: "video", data: root.gridVideoRenderer });
+    return out;
+  }
+  if (root.reelItemRenderer && root.reelItemRenderer.videoId) {
+    out.push({ type: "video", data: root.reelItemRenderer });
+    return out;
+  }
+  if (root.playlistRenderer && root.playlistRenderer.playlistId) {
+    out.push({ type: "playlist", data: root.playlistRenderer });
+    return out;
+  }
+  if (root.lockupViewModel && root.lockupViewModel.contentId) {
+    out.push({ type: "lockup", data: root.lockupViewModel });
+    return out;
+  }
+  if (root.channelRenderer && root.channelRenderer.channelId) {
+    out.push({ type: "channel", data: root.channelRenderer });
+    return out;
+  }
+  if (Array.isArray(root)) {
+    for (const child of root) {
+      collectInnertubeRenderers(child, out, depth + 1);
+      if (out.length >= 45) break;
+    }
+  } else {
+    for (const val of Object.values(root)) {
+      if (val && typeof val === "object") {
+        collectInnertubeRenderers(val, out, depth + 1);
+        if (out.length >= 45) break;
+      }
+    }
+  }
+  return out;
+}
+
+function mapInnertubeEntry(entry) {
+  const { type, data } = entry;
+  if (type === "video") {
+    const videoId = data.videoId;
+    const title = extractText(data.title || data.headline) || `Video ${videoId}`;
+    const channelName = extractText(data.ownerText || data.longBylineText || data.shortBylineText);
+    const desc = extractText(data.descriptionSnippet) || (channelName ? `Canal: ${channelName}` : "");
+    return {
+      id: `yt-v-${videoId}`,
+      ref: `video:${videoId}`,
+      title,
+      kind: "movie",
+      poster: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      backdrop: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+      overview: desc
+    };
+  }
+  if (type === "playlist") {
+    const playlistId = data.playlistId;
+    const title = extractText(data.title) || `Lista ${playlistId}`;
+    const thumbs = (data.thumbnails && data.thumbnails[0] && data.thumbnails[0].thumbnails) || (data.thumbnail && data.thumbnail.thumbnails) || [];
+    const poster = selectThumbnail(thumbs);
+    const channelName = extractText(data.shortBylineText || data.longBylineText);
+    return {
+      id: `yt-pl-${playlistId}`,
+      ref: `playlist:${playlistId}`,
+      title,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: channelName ? `Lista de reproducción · ${channelName}` : "Lista de reproducción de YouTube"
+    };
+  }
+  if (type === "lockup") {
+    const contentId = String(data.contentId || "");
+    const title = (data.metadata && data.metadata.lockupMetadataViewModel && data.metadata.lockupMetadataViewModel.title && data.metadata.lockupMetadataViewModel.title.content) || `Contenido ${contentId}`;
+    if (contentId.startsWith("PL") || contentId.startsWith("OL") || contentId.startsWith("UU")) {
+      return {
+        id: `yt-pl-${contentId}`,
+        ref: `playlist:${contentId}`,
+        title,
+        kind: "series",
+        poster: "https://www.youtube.com/img/desktop/yt_1200.png",
+        backdrop: "https://www.youtube.com/img/desktop/yt_1200.png",
+        overview: "Lista de reproducción de YouTube"
+      };
+    }
+    if (contentId.length === 11) {
+      return {
+        id: `yt-v-${contentId}`,
+        ref: `video:${contentId}`,
+        title,
+        kind: "movie",
+        poster: `https://i.ytimg.com/vi/${contentId}/hqdefault.jpg`,
+        backdrop: `https://i.ytimg.com/vi/${contentId}/maxresdefault.jpg`,
+        overview: "Video de YouTube"
+      };
+    }
+  }
+  if (type === "channel") {
+    const channelId = data.channelId;
+    const title = extractText(data.title) || `Canal ${channelId}`;
+    const thumbs = (data.thumbnail && data.thumbnail.thumbnails) || [];
+    const poster = selectThumbnail(thumbs);
+    const desc = extractText(data.descriptionSnippet) || "Canal público de YouTube";
+    return {
+      id: `yt-ch-${channelId}`,
+      ref: `channel:${channelId}`,
+      title,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: desc
+    };
+  }
+  return null;
+}
+
+function mapInvidiousSearchItem(v) {
+  if (!v || typeof v !== "object") return null;
+  const itemType = String(v.type || "video").toLowerCase();
+
+  if (itemType === "playlist" || v.playlistId) {
+    const playlistId = v.playlistId;
+    if (!playlistId) return null;
+    const poster = v.playlistThumbnail || selectThumbnail(v.videos && v.videos[0] && v.videos[0].videoThumbnails);
+    return {
+      id: `yt-pl-${playlistId}`,
+      ref: `playlist:${playlistId}`,
+      title: v.title || `Lista ${playlistId}`,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: v.author ? `Lista de reproducción · ${v.author}` : "Lista de reproducción de YouTube"
+    };
+  }
+
+  if (itemType === "channel" || (v.authorId && !v.videoId)) {
+    const channelId = v.authorId;
+    if (!channelId) return null;
+    const poster = selectThumbnail(v.authorThumbnails);
+    return {
+      id: `yt-ch-${channelId}`,
+      ref: `channel:${channelId}`,
+      title: v.author || v.title || `Canal ${channelId}`,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: v.description || "Canal público de YouTube"
+    };
+  }
+
+  const videoId = v.videoId;
+  if (!videoId) return null;
+  const isLive = Boolean(v.liveNow);
+  return {
+    id: `yt-v-${videoId}`,
+    ref: `video:${videoId}`,
+    title: v.title || `Video ${videoId}`,
+    kind: isLive ? "live" : "movie",
+    poster: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    backdrop: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+    overview: v.description || (v.author ? `Canal: ${v.author}` : "")
+  };
+}
+
+async function searchViaInvidious(queryText, searchType = "video", region = "AR") {
+  const encoded = encodeURIComponent(queryText.trim());
+  let invType = "all";
+  if (searchType === "video") invType = "video";
+  else if (searchType === "playlist") invType = "playlist";
+  else if (searchType === "channel") invType = "channel";
+
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await fetch(
+        `${inv}/api/v1/search?q=${encoded}&type=${invType}&region=${region}`,
+        {
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 KinoPlugin"
           }
         }
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) continue;
+
+      const items = [];
+      const seen = new Set();
+      for (const entry of data) {
+        const mapped = mapInvidiousSearchItem(entry);
+        if (mapped && !seen.has(mapped.id)) {
+          seen.add(mapped.id);
+          items.push(mapped);
+        }
       }
-    }),
-    new Promise((r) => setTimeout(r, 14000)),
-  ]);
-  return resolved || [];
-}
-
-function agenda() {
-  return cached("agenda", 45000, loadAgenda);
-}
-
-function isLive(e) {
-  const now = Date.now();
-  return e.start - 10 * 60000 <= now && now <= e.start + MATCH_MS;
-}
-
-// ---- canales ----
-const B1_LOGO = BACKUP1 + "/img/channels/";
-const B2_LOGO = BACKUP2 + "/assets/channel-logos/manual/";
-
-const MAIN = [
-  ["espn", "ESPN", "espn", B1_LOGO + "espn-1.webp"],
-  ["espn2", "ESPN 2", "espn2", B1_LOGO + "espn-2.webp"],
-  ["espn3", "ESPN 3", "espn3", B1_LOGO + "espn-3.webp"],
-  ["foxsports", "Fox Sports", "foxsports", B1_LOGO + "fox-sports-1.webp"],
-  ["foxsports2", "Fox Sports 2", "foxsports2", B1_LOGO + "fox-sports-2.webp"],
-  ["foxsports3", "Fox Sports 3", "foxsports3", B1_LOGO + "fox-sports-3.webp"],
-  ["dsports", "DSports", "dsports", B2_LOGO + "channel-8.jpg"],
-  ["dsports2", "DSports 2", "dsports2", B2_LOGO + "channel-8.jpg"],
-  ["dsportsplus", "DSports Plus", "dsportsplus", B2_LOGO + "channel-8.jpg"],
-  ["liga1max", "Liga 1 MAX", "liga1max", PRIMARY + "/img/logo-canal/liga_1_max.webp"],
-  ["telemundo", "Telemundo", "telemundo", B2_LOGO + "channel-50.png"],
-  ["espnmx", "ESPN México", "espnmx", B1_LOGO + "espn-1.webp"],
-  ["espn2mx", "ESPN 2 México", "espn2mx", B1_LOGO + "espn-2.webp"],
-  ["espn3mx", "ESPN 3 México", "espn3mx", B1_LOGO + "espn-3.webp"],
-  ["foxsportsmx", "Fox Sports México", "foxsportsmx", B1_LOGO + "fox-sports-1.webp"],
-  ["foxsports2mx", "Fox Sports 2 México", "foxsports2mx", B1_LOGO + "fox-sports-2.webp"],
-  ["foxsports3mx", "Fox Sports 3 México", "foxsports3mx", B1_LOGO + "fox-sports-3.webp"],
-  ["foxsportspremium", "Fox Sports Premium", "foxsportspremium", B1_LOGO + "fox-sports-premium.webp"],
-  ["tudnmx", "TUDN México", "tudn_mx", B1_LOGO + "tudn-mx.webp"],
-].map(([id, name, stream, logo]) => ({
-  id: "c-" + id,
-  name,
-  stream,
-  logo,
-  tokens: withSisters(["tvf90." + stream, "la18." + stream]),
-}));
-
-async function moreChannels() {
-  return cached("more", 30 * 60000, async () => {
-    const html = await fetchText(BACKUP2 + "/channels", 12000);
-    const out = [];
-    const re = /<a class="channel-card" href="\/channel\/([a-z0-9-]{1,80})"><div class="channel-logo"><img src="([^"]+)" alt="([^"]*)"/g;
-    let m;
-    while ((m = re.exec(html))) {
-      out.push({
-        id: "b2-" + m[1],
-        name: entities(m[3]) || m[1],
-        logo: /\.svg$/i.test(m[2]) ? undefined : BACKUP2 + m[2],
-        tokens: [1, 4, 2, 3].map((s) => `b2c.${m[1]}.${s}`),
-      });
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.log(`Aviso en búsqueda Invidious (${inv}):`, String(err));
     }
-    if (!out.length) throw new Error("channels empty");
-    return out;
-  }).catch(() => []);
+  }
+  return [];
 }
 
-// ---- shapes para la app (Nuvio) ----
-// id = "c:" + tokens unidos → getStreams usa ese id para resolver
-function refOf(tokens) {
-  return "c:" + tokens.join(",");
-}
+function mapPipedSearchItem(st) {
+  if (!st || typeof st !== "object") return null;
+  const url = String(st.url || "");
+  const itemType = String(st.type || "").toLowerCase();
 
-function eventItem(e) {
-  const live = isLive(e);
+  if (itemType === "playlist" || url.includes("list=")) {
+    const plMatch = url.match(/[?&]list=([A-Za-z0-9_-]+)/);
+    const playlistId = plMatch ? plMatch[1] : "";
+    if (!playlistId) return null;
+    const poster = st.thumbnail || "https://www.youtube.com/img/desktop/yt_1200.png";
+    return {
+      id: `yt-pl-${playlistId}`,
+      ref: `playlist:${playlistId}`,
+      title: st.name || st.title || `Lista ${playlistId}`,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: st.uploaderName ? `Lista de reproducción · ${st.uploaderName}` : "Lista de reproducción de YouTube"
+    };
+  }
+
+  if (itemType === "channel" || url.startsWith("/channel/")) {
+    const chMatch = url.match(/\/channel\/(UC[A-Za-z0-9_-]{22})/);
+    const channelId = chMatch ? chMatch[1] : "";
+    if (!channelId) return null;
+    const poster = st.thumbnail || "https://www.youtube.com/img/desktop/yt_1200.png";
+    return {
+      id: `yt-ch-${channelId}`,
+      ref: `channel:${channelId}`,
+      title: st.name || st.title || `Canal ${channelId}`,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: st.description || "Canal público de YouTube"
+    };
+  }
+
+  const vidMatch = url.match(/(?:v=|\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  const videoId = vidMatch ? vidMatch[1] : "";
+  if (!videoId) return null;
   return {
-    id: refOf(e.tokens),
-    title: e.title,
-    type: "channel",
-    poster: e.flag || undefined,
-    overview: [e.league, whenText(e.start)].filter(Boolean).join(" · "),
-    // extra para currentProgram / badge visual
-    currentProgram: live ? t("live") : whenText(e.start),
-    badges: [live ? t("live") : whenText(e.start)],
+    id: `yt-v-${videoId}`,
+    ref: `video:${videoId}`,
+    title: st.title || st.name || `Video ${videoId}`,
+    kind: st.isShort ? "movie" : "movie",
+    poster: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    backdrop: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+    overview: st.shortDescription || (st.uploaderName ? `Canal: ${st.uploaderName}` : "")
   };
 }
 
-function channelItem(c) {
-  return {
-    id: refOf(c.tokens),
-    title: c.name,
-    type: "channel",
-    poster: c.logo || undefined,
-    logo: c.logo || undefined,
+async function searchViaPiped(queryText, searchType = "video") {
+  const encoded = encodeURIComponent(queryText.trim());
+  let filter = "all";
+  if (searchType === "video") filter = "videos";
+  else if (searchType === "playlist") filter = "playlists";
+  else if (searchType === "channel") filter = "channels";
+
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const endpoints = [
+        `${piped}/search?q=${encoded}&filter=${filter}`,
+        `${piped}/results?search_query=${encoded}`
+      ];
+      for (const endpoint of endpoints) {
+        try {
+          const res = await fetch(endpoint, {
+            headers: {
+              "Accept": "application/json",
+              "User-Agent": "Mozilla/5.0 KinoPlugin"
+            }
+          });
+          if (!res.ok) continue;
+          const data = await res.json();
+          const rawItems = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
+          if (rawItems.length === 0) continue;
+
+          const items = [];
+          const seen = new Set();
+          for (const st of rawItems) {
+            const mapped = mapPipedSearchItem(st);
+            if (mapped && !seen.has(mapped.id)) {
+              seen.add(mapped.id);
+              items.push(mapped);
+            }
+          }
+          if (items.length > 0) return items;
+        } catch (_) {}
+      }
+    } catch (err) {
+      console.log(`Aviso en búsqueda Piped (${piped}):`, String(err));
+    }
+  }
+  return [];
+}
+
+async function fetchTrendingFallback(region = "AR") {
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await fetch(`${inv}/api/v1/trending?region=${region}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const items = data.map(mapInvidiousSearchItem).filter(Boolean);
+        if (items.length > 0) return items;
+      }
+    } catch (_) {}
+  }
+
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const res = await fetch(`${piped}/trending?region=${region}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const items = data.map(mapPipedSearchItem).filter(Boolean);
+        if (items.length > 0) return items;
+      }
+    } catch (_) {}
+  }
+
+  return [];
+}
+
+async function fetchItemsByQuery(queryText, options = {}) {
+  const { searchType = "video,playlist,channel", pageToken = "", maxResults = 18, videoCategoryId = "" } = options;
+  const region = getRegionCode();
+
+  // Plan A.1: YouTube Data API v3
+  const apiParams = {
+    part: "snippet",
+    q: queryText,
+    type: searchType,
+    maxResults: String(maxResults),
+    regionCode: region
   };
+  if (pageToken) apiParams.pageToken = pageToken;
+  if (videoCategoryId && searchType === "video") apiParams.videoCategoryId = videoCategoryId;
+
+  const apiData = await ytDataApiFetch("search", apiParams);
+  if (apiData && Array.isArray(apiData.items) && apiData.items.length > 0) {
+    const items = apiData.items.map(mapDataApiItem).filter(Boolean);
+    if (items.length > 0) {
+      return {
+        items,
+        next: apiData.nextPageToken || undefined
+      };
+    }
+  }
+
+  // Plan A.2: YouTube Innertube directo
+  try {
+    const innertubePayload = { query: queryText };
+    if (searchType === "playlist") {
+      innertubePayload.params = "EgIQAw%3D%3D";
+    } else if (searchType === "channel") {
+      innertubePayload.params = "EgIQAg%3D%3D";
+    }
+
+    const raw = await ytInnertubeFetch("search", innertubePayload);
+    const renderers = collectInnertubeRenderers(raw);
+    const seen = new Set();
+    const items = [];
+    for (const r of renderers) {
+      const mapped = mapInnertubeEntry(r);
+      if (mapped && !seen.has(mapped.id)) {
+        seen.add(mapped.id);
+        items.push(mapped);
+      }
+    }
+    if (items.length > 0) {
+      return { items };
+    }
+  } catch (err) {
+    console.log("Aviso en búsqueda Innertube:", String(err));
+  }
+
+  // Plan B.1: Invidious (invidious.nerdvpn.de, inv.nadeko.net, invidious.tiekoetter.com)
+  const invItems = await searchViaInvidious(queryText, searchType, region);
+  if (invItems.length > 0) {
+    return { items: invItems.slice(0, maxResults) };
+  }
+
+  // Plan B.2: Piped (cf.piped.video, piped.ducks.party, piped.kavin.rocks, piped.wireway.ch)
+  const pipedItems = await searchViaPiped(queryText, searchType);
+  if (pipedItems.length > 0) {
+    return { items: pipedItems.slice(0, maxResults) };
+  }
+
+  return { items: [] };
 }
 
-function norm(s) {
-  return String(s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// ---- API Nuvio que espera la app ----
-
-/**
- * getHome() → filas del home del repo
- * Cada item con type "channel" abre el player en vivo (media_kit, sin barra).
- */
-async function getHome() {
-  const events = await agenda();
-  const more = await moreChannels();
+async function home() {
   const rows = [];
+  const region = getRegionCode();
 
-  const liveNow = events.filter(isLive).map(eventItem);
-  if (liveNow.length) {
-    rows.push({ id: "now", title: t("now"), type: "row", items: liveNow.slice(0, 30) });
-  }
-
-  const upcomingEv = events.filter((e) => !isLive(e) && e.start > Date.now()).map(eventItem);
-  if (upcomingEv.length) {
-    rows.push({ id: "next", title: t("next"), type: "row", items: upcomingEv.slice(0, 40) });
-  }
-
-  rows.push({
-    id: "ch",
-    title: t("channels"),
-    type: "row",
-    items: MAIN.map(channelItem),
+  let trendingItems = [];
+  const popularData = await ytDataApiFetch("videos", {
+    part: "snippet",
+    chart: "mostPopular",
+    regionCode: region,
+    maxResults: "15"
   });
 
-  if (more.length) {
+  if (popularData && Array.isArray(popularData.items) && popularData.items.length > 0) {
+    trendingItems = popularData.items.map(mapDataApiItem).filter(Boolean);
+  } else {
+    trendingItems = (await fetchTrendingFallback(region)).slice(0, 15);
+  }
+
+  if (trendingItems.length > 0) {
     rows.push({
-      id: "more",
-      title: t("more"),
-      type: "row",
-      items: more.slice(0, 60).map(channelItem),
+      id: "trending",
+      title: "Tendencias en YouTube",
+      ref: "cat:trending",
+      genre: "entretenimiento",
+      items: trendingItems
     });
+  }
+
+  const categoriesToLoad = rows.length > 0 ? HOME_CATEGORIES.slice(1, 5) : HOME_CATEGORIES.slice(0, 4);
+  for (const cat of categoriesToLoad) {
+    try {
+      const page = await fetchItemsByQuery(cat.query, {
+        searchType: cat.searchType || "video",
+        videoCategoryId: cat.videoCategoryId || "",
+        maxResults: 12
+      });
+      if (page.items && page.items.length > 0) {
+        rows.push({
+          id: cat.id,
+          title: cat.title,
+          ref: cat.ref,
+          genre: cat.genre,
+          items: page.items
+        });
+      }
+    } catch (err) {
+      console.log(`Aviso cargando fila ${cat.id}:`, String(err));
+    }
   }
 
   return rows;
 }
 
-/**
- * search(query) → lista de ContentItem
- */
-async function search(query) {
-  const q = norm(typeof query === "string" ? query : (query && query.q) || "");
-  if (q.length < 2) return [];
-  const events = (await agenda())
-    .filter((e) => norm(e.title + " " + e.league).includes(q))
-    .map(eventItem);
-  const chans = MAIN.filter((c) => norm(c.name).includes(q)).map(channelItem);
-  const more = (await moreChannels()).filter((c) => norm(c.name).includes(q)).map(channelItem);
-  return events.concat(chans).concat(more).slice(0, 50);
-}
+async function browse(ref, cursor) {
+  const cleanRef = String(ref || "cat:trending").trim();
 
-// ---- resolve de tokens (mismos servidores del plugin original) ----
-const ID = /^[A-Za-z0-9_-]{1,40}$/;
-const SLUG = /^[a-z0-9-]{1,100}$/;
-const PLAYBACK = /playbackURL\s*=\s*"([^"]+)"/;
+  if (cleanRef.startsWith("playlist:") || cleanRef.startsWith("channel:")) {
+    const epData = await episodes(cleanRef);
+    const items = (epData.episodes || []).map(ep => ({
+      id: `yt-v-${ep.ref.replace(/^video:/, "")}`,
+      ref: ep.ref,
+      title: ep.title,
+      kind: "movie",
+      poster: ep.still || "https://www.youtube.com/img/desktop/yt_1200.png",
+      backdrop: ep.still || "https://www.youtube.com/img/desktop/yt_1200.png",
+      overview: ep.overview || ""
+    }));
+    return { items };
+  }
 
-function unslash(s) {
-  return String(s).replace(/\\\//g, "/");
-}
+  const catId = cleanRef.replace(/^cat:/, "");
+  const foundCat = HOME_CATEGORIES.find(c => c.id === catId || c.ref === cleanRef) || HOME_CATEGORIES[0];
 
-async function get(url, headers, ms) {
-  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = ctrl ? setTimeout(() => ctrl.abort(), ms || 8000) : null;
-  try {
-    const r = await fetch(url, {
-      signal: ctrl ? ctrl.signal : undefined,
-      headers: Object.assign(
-        { "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36" },
-        headers || {}
-      ),
+  if (foundCat.id === "trending" && !cursor) {
+    const region = getRegionCode();
+    const popularData = await ytDataApiFetch("videos", {
+      part: "snippet",
+      chart: "mostPopular",
+      regionCode: region,
+      maxResults: "20"
     });
-    return { ok: r.ok, status: r.status, text: await r.text() };
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-async function viaTvf90(id, ms) {
-  const r = await get(`https://tvf90.com/5.php?stream=${id}`, { Referer: "https://tvf90.com/" }, ms);
-  const m = r.ok && PLAYBACK.exec(r.text);
-  return m ? unslash(m[1]) : "";
-}
-
-async function viaLa18(id, plural, ms) {
-  const r = await get(
-    `https://la18hd.su/vivo/${plural ? "canales" : "canal"}.php?stream=${id}`,
-    { "Sec-Fetch-Dest": "iframe" },
-    ms
-  );
-  const m = r.ok && /"src":"([^"]+)"/.exec(r.text);
-  return m ? unslash(m[1]) : "";
-}
-
-async function viaStreamxhd(id, ms) {
-  const r = await get(`https://streamxhd.st/live1.php?stream=${id}`, { "Sec-Fetch-Dest": "iframe" }, ms);
-  if (!r.ok) return "";
-  const html = r.text;
-  const arr = /var playbackURL="",(\w+)=\[\][^;]*;\s*\1=(\[\[[\s\S]*?\]\]);/.exec(html);
-  const keyFns = /var k=(\w+)\(\)\+(\w+)\(\);/.exec(html);
-  if (!arr || !keyFns) return "";
-  const fn = (name) => {
-    const f = new RegExp("function " + name + "\\(\\)\\{return (\\d+);\\}").exec(html);
-    return f ? parseInt(f[1], 10) : NaN;
-  };
-  const k = fn(keyFns[1]) + fn(keyFns[2]);
-  const pairs = [];
-  const re = /\[(\d+),"([A-Za-z0-9+/=]+)"\]/g;
-  let m;
-  while ((m = re.exec(arr[2]))) pairs.push([parseInt(m[1], 10), m[2]]);
-  if (!pairs.length || !Number.isFinite(k)) return "";
-  pairs.sort((a, b) => a[0] - b[0]);
-  let out = "";
-  for (const [, b] of pairs) out += String.fromCharCode(parseInt(atob(b).replace(/\D/g, ""), 10) - k);
-  return /^https:\/\//.test(out) ? out : "";
-}
-
-async function viaStreamtp(id, ms) {
-  const r = await get(`https://streamtp99a.sbs/global1.php?stream=${id}`, {}, ms);
-  const m = r.ok && PLAYBACK.exec(r.text);
-  return m ? unslash(m[1]) : "";
-}
-
-async function viaBackup2(query, ms) {
-  const r = await get(`${BACKUP2}/api/direct-playback.php?${query}`, {}, ms);
-  if (!r.ok) return "";
-  try {
-    const data = JSON.parse(r.text);
-    const tok = data && data.success ? tokenOf(data.url) : "";
-    return tok && !tok.startsWith("b2") ? runToken(tok, ms) : "";
-  } catch {
-    return "";
-  }
-}
-
-async function runToken(token, ms) {
-  const [kind, a, b] = token.split(".");
-  if (kind === "b2e" && SLUG.test(a) && /^\d{1,8}$/.test(b)) return viaBackup2(`type=event&slug=${a}&source=${b}`, ms);
-  if (kind === "b2c" && SLUG.test(a) && /^[1-4]$/.test(b)) return viaBackup2(`type=channel&slug=${a}&server=${b}`, ms);
-  if (!ID.test(a || "")) return "";
-  if (kind === "tvf90") return viaTvf90(a, ms);
-  if (kind === "la18") return viaLa18(a, false, ms);
-  if (kind === "la18c") return viaLa18(a, true, ms);
-  if (kind === "sxhd") return viaStreamxhd(a, ms);
-  if (kind === "tp") return viaStreamtp(a, ms);
-  return "";
-}
-
-async function verify(url) {
-  // Solo verificamos hosts conocidos de playlist; el resto se confía
-  if (!/^https:\/\/[^/]*\.(?:ftlly|fubo18|domhsd|futlivehd)\.com[:/]/.test(url)) return "ok";
-  try {
-    const r = await get(url, {}, 4500);
-    if (r.ok) {
-      if (/^#EXTM3U/.test(r.text.trimStart())) return "ok";
-      return "offline";
+    if (popularData && Array.isArray(popularData.items) && popularData.items.length > 0) {
+      return {
+        items: popularData.items.map(mapDataApiItem).filter(Boolean),
+        next: popularData.nextPageToken || undefined
+      };
     }
-    return r.status >= 400 ? "offline" : "ok";
-  } catch {
-    return "slow";
+    const fallbackTrending = await fetchTrendingFallback(region);
+    if (fallbackTrending.length > 0) {
+      return { items: fallbackTrending.slice(0, 20) };
+    }
   }
+
+  return await fetchItemsByQuery(foundCat.query, {
+    searchType: foundCat.searchType || "video",
+    pageToken: cursor || "",
+    maxResults: 20
+  });
 }
 
-/**
- * getStreams(id) — la app llama esto al abrir un canal
- * id es "c:token1,token2,..."
- * Devuelve lista de { url, name?, quality?, headers? }
- */
-async function getStreams(id) {
-  const raw = String(id || "");
-  const m = /^c:([A-Za-z0-9_.,-]{1,900})$/.exec(raw);
-  if (!m) return [];
+async function __kino_search(query) {
+  const qText = typeof query === "string"
+    ? query.trim()
+    : (query && typeof query.q === "string" ? query.q.trim() : "");
 
-  const started = Date.now();
-  const servers = [];
-  let slow = "";
+  if (!qText) {
+    return { items: [] };
+  }
 
-  for (const token of m[1].split(",").slice(0, 8)) {
-    const left = 18000 - (Date.now() - started);
-    if (left < 2500) break;
-    try {
-      const url = await runToken(token, Math.min(8000, left - 1500));
-      if (!url) continue;
-      const verdict = await verify(url);
-      if (verdict === "offline") continue;
-      if (verdict === "slow") {
-        slow = slow || url;
-        continue;
-      }
-      // Primer servidor bueno: devolver ya (la app puede pedir más, pero con uno basta para live)
-      servers.push({
-        url,
-        name: token.split(".")[0].toUpperCase(),
-        quality: "LIVE",
-        headers: {},
+  const cursor = (query && typeof query === "object" && query.cursor) ? String(query.cursor) : "";
+  let searchType = "video,playlist,channel";
+  if (query && typeof query === "object") {
+    if (query.type === "movie") searchType = "video";
+    else if (query.type === "series") searchType = "playlist,channel";
+  }
+
+  return await fetchItemsByQuery(qText, {
+    searchType,
+    pageToken: cursor,
+    maxResults: 20
+  });
+}
+
+function extractEpisodesFromBrowseRoot(raw, fallbackOverview = "") {
+  const renderers = collectInnertubeRenderers(raw);
+  const epList = [];
+  const seen = new Set();
+  for (const r of renderers) {
+    let vid = "";
+    let title = "";
+    let overview = "";
+    if (r.type === "video" && r.data && r.data.videoId) {
+      vid = r.data.videoId;
+      title = extractText(r.data.title || r.data.headline);
+      overview = extractText(r.data.descriptionSnippet || r.data.shortBylineText || r.data.publishedTimeText) || fallbackOverview;
+    } else if (r.type === "lockup" && r.data && String(r.data.contentId || "").length === 11) {
+      vid = String(r.data.contentId);
+      title = (r.data.metadata && r.data.metadata.lockupMetadataViewModel && r.data.metadata.lockupMetadataViewModel.title && r.data.metadata.lockupMetadataViewModel.title.content) || "";
+      overview = fallbackOverview;
+    }
+    if (vid && !seen.has(vid)) {
+      seen.add(vid);
+      epList.push({
+        season: 1,
+        number: epList.length + 1,
+        ref: `video:${vid}`,
+        title: title || `Episodio ${epList.length + 1}`,
+        still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+        overview
       });
-      // Devolvemos varios si hay tiempo, para que el usuario pueda cambiar de servidor
-      if (servers.length >= 3) break;
+    }
+  }
+  return epList;
+}
+
+async function fetchPlaylistEpisodesFallback(playlistId) {
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await fetch(`${inv}/api/v1/playlists/${playlistId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const videos = data && Array.isArray(data.videos) ? data.videos : [];
+      if (videos.length === 0) continue;
+
+      const epList = [];
+      const seen = new Set();
+      for (const v of videos) {
+        if (!v || !v.videoId || seen.has(v.videoId)) continue;
+        seen.add(v.videoId);
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${v.videoId}`,
+          title: v.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+          overview: v.author ? `Canal: ${v.author}` : ""
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: data.title || "Lista de reproducción de YouTube" },
+          episodes: epList
+        };
+      }
     } catch (_) {}
   }
 
-  if (!servers.length && slow) {
-    servers.push({ url: slow, name: "BACKUP", quality: "LIVE", headers: {} });
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const res = await fetch(`${piped}/playlists/${playlistId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const streams = data && Array.isArray(data.relatedStreams) ? data.relatedStreams : [];
+      if (streams.length === 0) continue;
+
+      const epList = [];
+      const seen = new Set();
+      for (const st of streams) {
+        if (!st) continue;
+        const vid = extractVideoId(st.url || "");
+        if (!vid || vid.length !== 11 || seen.has(vid)) continue;
+        seen.add(vid);
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${vid}`,
+          title: st.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+          overview: st.shortDescription || (st.uploaderName ? `Canal: ${st.uploaderName}` : "")
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: data.name || "Lista de reproducción de YouTube" },
+          episodes: epList
+        };
+      }
+    } catch (_) {}
   }
-  return servers;
+
+  return null;
 }
 
-// Export CommonJS (la app carga con module.exports)
-module.exports = {
-  getHome,
-  search,
-  getStreams,
+async function fetchChannelEpisodesFallback(channelId) {
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await fetch(`${inv}/api/v1/channels/${channelId}/videos`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const rawVideos = Array.isArray(data) ? data : (data && Array.isArray(data.videos) ? data.videos : []);
+      if (rawVideos.length === 0) continue;
+
+      const epList = [];
+      const seen = new Set();
+      for (const v of rawVideos) {
+        if (!v || !v.videoId || seen.has(v.videoId)) continue;
+        seen.add(v.videoId);
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${v.videoId}`,
+          title: v.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+          overview: v.description || (v.author ? `Canal: ${v.author}` : "")
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: (rawVideos[0] && rawVideos[0].author) || "Videos del canal" },
+          episodes: epList
+        };
+      }
+    } catch (_) {}
+  }
+
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const res = await fetch(`${piped}/channel/${channelId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const streams = data && Array.isArray(data.relatedStreams) ? data.relatedStreams : [];
+      if (streams.length === 0) continue;
+
+      const epList = [];
+      const seen = new Set();
+      for (const st of streams) {
+        if (!st) continue;
+        const vid = extractVideoId(st.url || "");
+        if (!vid || vid.length !== 11 || seen.has(vid)) continue;
+        seen.add(vid);
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${vid}`,
+          title: st.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+          overview: st.shortDescription || (data.name ? `Canal: ${data.name}` : "")
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: data.name || "Videos del canal" },
+          episodes: epList
+        };
+      }
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+async function episodes(ref) {
+  const rawRef = String(ref || "").trim();
+
+  if (rawRef.startsWith("playlist:")) {
+    const playlistId = rawRef.slice("playlist:".length);
+    const apiData = await ytDataApiFetch("playlistItems", {
+      part: "snippet",
+      playlistId,
+      maxResults: "50"
+    });
+
+    if (apiData && Array.isArray(apiData.items) && apiData.items.length > 0) {
+      const epList = [];
+      for (let i = 0; i < apiData.items.length; i++) {
+        const snippet = apiData.items[i].snippet || {};
+        const vid = snippet.resourceId && snippet.resourceId.videoId;
+        if (!vid) continue;
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${vid}`,
+          title: snippet.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+          overview: snippet.description || ""
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: "Lista de reproducción de YouTube" },
+          episodes: epList
+        };
+      }
+    }
+
+    const browseId = playlistId.startsWith("VL") ? playlistId : `VL${playlistId}`;
+    try {
+      const raw = await ytInnertubeFetch("browse", { browseId });
+      const epList = extractEpisodesFromBrowseRoot(raw);
+      if (epList.length > 0) {
+        return {
+          series: { title: "Lista de reproducción de YouTube" },
+          episodes: epList
+        };
+      }
+    } catch (err) {
+      console.log("Aviso en browse de playlist:", String(err));
+    }
+
+    const fallbackPl = await fetchPlaylistEpisodesFallback(playlistId);
+    if (fallbackPl) return fallbackPl;
+
+    return {
+      series: { title: "Lista de reproducción de YouTube" },
+      episodes: []
+    };
+  }
+
+  if (rawRef.startsWith("channel:")) {
+    const channelId = rawRef.slice("channel:".length);
+    const channelData = await ytDataApiFetch("channels", {
+      part: "contentDetails,snippet",
+      id: channelId
+    });
+    const uploadsPlaylistId = channelData
+      && channelData.items
+      && channelData.items[0]
+      && channelData.items[0].contentDetails
+      && channelData.items[0].contentDetails.relatedPlaylists
+      && channelData.items[0].contentDetails.relatedPlaylists.uploads;
+
+    if (uploadsPlaylistId) {
+      const fromApi = await episodes(`playlist:${uploadsPlaylistId}`);
+      if (fromApi.episodes && fromApi.episodes.length > 0) {
+        return fromApi;
+      }
+    }
+
+    try {
+      const rawVideosTab = await ytInnertubeFetch("browse", {
+        browseId: channelId,
+        params: "EgZ2aWRlb3PyBgQKAjoA"
+      });
+      const channelTitle = (rawVideosTab && rawVideosTab.metadata && rawVideosTab.metadata.channelMetadataRenderer && rawVideosTab.metadata.channelMetadataRenderer.title) || "Videos del canal";
+      const epList = extractEpisodesFromBrowseRoot(rawVideosTab, `Canal: ${channelTitle}`);
+      if (epList.length > 0) {
+        return {
+          series: { title: channelTitle },
+          episodes: epList
+        };
+      }
+    } catch (err) {
+      console.log("Aviso en pestaña videos del canal:", String(err));
+    }
+
+    if (channelId.startsWith("UC") && channelId.length > 4) {
+      const uuPlaylist = "UU" + channelId.slice(2);
+      const fromUploads = await episodes(`playlist:${uuPlaylist}`);
+      if (fromUploads.episodes && fromUploads.episodes.length > 0) {
+        return fromUploads;
+      }
+    }
+
+    const fallbackCh = await fetchChannelEpisodesFallback(channelId);
+    if (fallbackCh) return fallbackCh;
+
+    return {
+      series: { title: "Videos del canal" },
+      episodes: []
+    };
+  }
+
+  const vid = extractVideoId(rawRef);
+  return {
+    series: { title: "Video de YouTube" },
+    episodes: [
+      {
+        season: 1,
+        number: 1,
+        ref: `video:${vid}`,
+        title: "Reproducir video",
+        still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`
+      }
+    ]
+  };
+}
+
+function extractVideoId(ref) {
+  const clean = String(ref || "").trim();
+  if (clean.startsWith("video:")) return clean.slice("video:".length).trim();
+  const match = clean.match(/(?:v=|youtu\.be\/|\/vi\/|\/embed\/)([A-Za-z0-9_-]{11})/);
+  if (match) return match[1];
+  return clean;
+}
+
+function extractSubtitles(data, prefLang) {
+  const subList = [];
+  const captionTracks = data
+    && data.captions
+    && data.captions.playerCaptionsTracklistRenderer
+    && data.captions.playerCaptionsTracklistRenderer.captionTracks;
+
+  let hasPrefSub = false;
+  let translatableTrack = null;
+
+  if (Array.isArray(captionTracks)) {
+    for (const track of captionTracks) {
+      if (!track || !track.baseUrl) continue;
+      const langCode = String(track.languageCode || "es");
+      if (langCode === prefLang || langCode.startsWith(prefLang + "-")) {
+        hasPrefSub = true;
+      }
+      if (track.isTranslatable && (langCode.startsWith("en") || !translatableTrack)) {
+        translatableTrack = track;
+      }
+      const vttUrl = track.baseUrl.includes("fmt=")
+        ? track.baseUrl.replace(/fmt=[^&]+/, "fmt=vtt")
+        : track.baseUrl + "&fmt=vtt";
+      subList.push({
+        lang: langCode,
+        url: vttUrl,
+        format: "vtt",
+        label: extractText(track.name) || langCode,
+        translated: false
+      });
+    }
+
+    if (!hasPrefSub && translatableTrack && translatableTrack.baseUrl) {
+      const baseVtt = translatableTrack.baseUrl.includes("fmt=")
+        ? translatableTrack.baseUrl.replace(/fmt=[^&]+/, "fmt=vtt")
+        : translatableTrack.baseUrl + "&fmt=vtt";
+      subList.push({
+        lang: prefLang,
+        url: baseVtt + "&tlang=" + encodeURIComponent(prefLang),
+        format: "vtt",
+        label: prefLang.toUpperCase() + " (Traducción automática)",
+        translated: true
+      });
+    }
+
+    subList.sort((a, b) => {
+      const aMatch = (a.lang === prefLang || a.lang.startsWith(prefLang + "-")) ? 0 : 1;
+      const bMatch = (b.lang === prefLang || b.lang.startsWith(prefLang + "-")) ? 0 : 1;
+      return aMatch - bMatch;
+    });
+  }
+
+  return subList;
+}
+
+/**
+ * Plan B.1 de reproducción: Invidious (invidious.nerdvpn.de, inv.nadeko.net, invidious.tiekoetter.com).
+ */
+async function resolveViaInvidious(videoId) {
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await fetch(`${inv}/api/v1/videos/${videoId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!data || typeof data !== "object") continue;
+
+      const subList = [];
+      if (Array.isArray(data.captions)) {
+        for (const cap of data.captions) {
+          if (cap && typeof cap.url === "string") {
+            const subUrl = cap.url.startsWith("http") ? cap.url : `${inv}${cap.url}`;
+            subList.push({
+              lang: cap.language_code || cap.languageCode || "es",
+              label: cap.label || "Subtítulo",
+              url: subUrl,
+              format: "vtt"
+            });
+          }
+        }
+      }
+
+      const candidates = [];
+
+      if (typeof data.hlsUrl === "string" && data.hlsUrl.startsWith("http")) {
+        candidates.push({
+          url: data.hlsUrl.startsWith("https://") ? data.hlsUrl : `${inv}${data.hlsUrl}`,
+          mime: "application/x-mpegURL",
+          headers: { "User-Agent": "Mozilla/5.0" },
+          label: "HLS (Invidious)"
+        });
+      }
+
+      if (Array.isArray(data.formatStreams)) {
+        const sorted = [...data.formatStreams]
+          .filter(f => f && typeof f.url === "string")
+          .sort((a, b) => (parseInt(String(b.resolution || "0"), 10) || 0) - (parseInt(String(a.resolution || "0"), 10) || 0));
+
+        for (const fmt of sorted) {
+          const streamUrl = fmt.url.startsWith("http") ? fmt.url : `${inv}${fmt.url}`;
+          const mime = String(fmt.type || "video/mp4").split(";")[0].trim() || "video/mp4";
+          candidates.push({
+            url: streamUrl,
+            mime,
+            headers: { "User-Agent": "Mozilla/5.0" },
+            label: `${fmt.qualityLabel || fmt.resolution || "MP4"} (Invidious)`
+          });
+        }
+      }
+
+      candidates.push({
+        url: `${inv}/latest_version?id=${videoId}&itag=18`,
+        mime: "video/mp4",
+        headers: { "User-Agent": "Mozilla/5.0" },
+        label: "360p Directo (Invidious)"
+      });
+
+      if (candidates.length > 0) {
+        const primary = candidates[0];
+        const alternatives = candidates.slice(1, 9);
+        return {
+          url: primary.url,
+          mime: primary.mime,
+          headers: primary.headers,
+          subtitles: subList.length > 0 ? subList.slice(0, 30) : undefined,
+          alternatives: alternatives.length > 0 ? alternatives : undefined,
+          expiresInSeconds: 10800
+        };
+      }
+    } catch (_) {
+      // Probar siguiente espejo de Invidious
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Plan B.2 de reproducción: Piped (cf.piped.video, piped.ducks.party, piped.kavin.rocks, piped.wireway.ch).
+ */
+async function resolveViaPiped(videoId) {
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const res = await fetch(`${piped}/streams/${videoId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!data || typeof data !== "object") continue;
+
+      const subList = [];
+      if (Array.isArray(data.subtitles)) {
+        for (const sub of data.subtitles) {
+          if (sub && typeof sub.url === "string" && sub.url.startsWith("https://")) {
+            subList.push({
+              lang: sub.code || "es",
+              label: sub.name || sub.code || "Subtítulo",
+              url: sub.url,
+              format: (sub.mimeType && sub.mimeType.includes("ttml")) ? "ttml" : "vtt"
+            });
+          }
+        }
+      }
+
+      const candidates = [];
+
+      if (typeof data.hls === "string" && data.hls.startsWith("https://")) {
+        candidates.push({
+          url: data.hls,
+          mime: "application/x-mpegURL",
+          headers: { "User-Agent": "Mozilla/5.0" },
+          label: "HLS (Piped)"
+        });
+      }
+
+      if (Array.isArray(data.videoStreams)) {
+        const withAudio = data.videoStreams
+          .filter(v => v && typeof v.url === "string" && v.url.startsWith("https://") && v.videoOnly === false)
+          .sort((a, b) => (Number(b.height) || 0) - (Number(a.height) || 0));
+
+        const anyVideo = data.videoStreams
+          .filter(v => v && typeof v.url === "string" && v.url.startsWith("https://") && v.videoOnly !== false)
+          .sort((a, b) => (Number(b.height) || 0) - (Number(a.height) || 0));
+
+        for (const v of [...withAudio, ...anyVideo]) {
+          const mime = String(v.mimeType || "video/mp4").split(";")[0].trim() || "video/mp4";
+          candidates.push({
+            url: v.url,
+            mime,
+            headers: { "User-Agent": "Mozilla/5.0" },
+            label: `${v.quality || (v.height ? v.height + "p" : "MP4")} (Piped)`
+          });
+        }
+      }
+
+      if (candidates.length > 0) {
+        const primary = candidates[0];
+        const alternatives = candidates.slice(1, 9);
+        return {
+          url: primary.url,
+          mime: primary.mime,
+          headers: primary.headers,
+          subtitles: subList.length > 0 ? subList.slice(0, 30) : undefined,
+          alternatives: alternatives.length > 0 ? alternatives : undefined,
+          expiresInSeconds: 10800
+        };
+      }
+    } catch (_) {
+      // Probar siguiente instancia de Piped
+    }
+  }
+
+  return null;
+}
+
+async function resolve(ref) {
+  const videoId = extractVideoId(ref);
+  if (!videoId) {
+    throw new Error("Identificador de video de YouTube inválido");
+  }
+
+  await ytDataApiFetch("videos", {
+    part: "snippet,contentDetails",
+    id: videoId
+  });
+
+  const prefLang = getPreferredLang();
+  const region = getRegionCode();
+
+  const clients = [
+    {
+      clientName: "IOS",
+      clientVersion: "20.10.4",
+      deviceMake: "Apple",
+      deviceModel: "iPhone16,2",
+      osName: "iPhone",
+      osVersion: "18.3.2.22D82",
+      userAgent: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+    },
+    {
+      clientName: "ANDROID_VR",
+      clientVersion: "1.61.48",
+      deviceMake: "Oculus",
+      deviceModel: "Quest 3",
+      osName: "Android",
+      osVersion: "12L",
+      androidSdkVersion: 32,
+      userAgent: "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+    },
+    {
+      clientName: "ANDROID",
+      clientVersion: "20.10.38",
+      deviceMake: "Google",
+      deviceModel: "Pixel 8",
+      osName: "Android",
+      osVersion: "14",
+      androidSdkVersion: 34,
+      userAgent: "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+    }
+  ];
+
+  let hlsCandidate = null;
+  const progressiveCandidates = [];
+  let collectedSubtitles = [];
+  let minExpires = 21600;
+
+  // Plan A: YouTube Innertube directo
+  for (const client of clients) {
+    try {
+      const payload = {
+        videoId,
+        context: {
+          client: {
+            clientName: client.clientName,
+            clientVersion: client.clientVersion,
+            deviceMake: client.deviceMake,
+            deviceModel: client.deviceModel,
+            osName: client.osName,
+            osVersion: client.osVersion,
+            androidSdkVersion: client.androidSdkVersion,
+            hl: prefLang,
+            gl: region
+          }
+        },
+        contentCheckOk: true,
+        racyCheckOk: true
+      };
+
+      const res = await fetch(`${YT_INNERTUBE_BASE}/player?prettyPrint=false`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "User-Agent": client.userAgent
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      const streamingData = data && data.streamingData;
+      if (!streamingData) continue;
+
+      if (Number(streamingData.expiresInSeconds) > 0) {
+        minExpires = Math.min(minExpires, Number(streamingData.expiresInSeconds));
+      }
+
+      if (collectedSubtitles.length === 0) {
+        collectedSubtitles = extractSubtitles(data, prefLang);
+      }
+
+      if (!hlsCandidate && typeof streamingData.hlsManifestUrl === "string" && streamingData.hlsManifestUrl.startsWith("https://")) {
+        hlsCandidate = {
+          url: streamingData.hlsManifestUrl,
+          mime: "application/x-mpegURL",
+          headers: { "User-Agent": client.userAgent },
+          label: "HLS Adaptativo (Full HD / Multi-audio)"
+        };
+      }
+
+      const progFormats = (Array.isArray(streamingData.formats) ? streamingData.formats : [])
+        .filter(f => f && typeof f.url === "string" && f.url.startsWith("https://"))
+        .sort((a, b) => (Number(b.height) || 0) - (Number(a.height) || 0));
+
+      for (const fmt of progFormats) {
+        const mimeType = String(fmt.mimeType || "").split(";")[0].trim() || "video/mp4";
+        const quality = fmt.qualityLabel || `${fmt.height || 360}p`;
+        const label = `${quality} MP4 (${client.clientName})`;
+        if (!progressiveCandidates.some(p => p.url === fmt.url)) {
+          progressiveCandidates.push({
+            url: fmt.url,
+            mime: mimeType,
+            headers: { "User-Agent": client.userAgent },
+            label
+          });
+        }
+      }
+
+      if (hlsCandidate && progressiveCandidates.length > 0) {
+        break;
+      }
+    } catch (err) {
+      console.log(`Aviso en cliente ${client.clientName}:`, String(err));
+    }
+  }
+
+  const allStreams = [];
+  if (hlsCandidate) {
+    allStreams.push(hlsCandidate);
+  }
+  for (const prog of progressiveCandidates) {
+    allStreams.push(prog);
+  }
+
+  if (allStreams.length > 0) {
+    const primary = allStreams[0];
+    const mirrorFallbacks = INVIDIOUS_MIRRORS.map(inv => ({
+      url: `${inv}/latest_version?id=${videoId}&itag=18`,
+      mime: "video/mp4",
+      headers: { "User-Agent": "Mozilla/5.0" },
+      label: `Respaldo Invidious (${inv.replace(/^https:\/\//, "")})`
+    }));
+    const alternatives = [...allStreams.slice(1), ...mirrorFallbacks].slice(0, 9).map(s => ({
+      url: s.url,
+      mime: s.mime,
+      headers: s.headers,
+      label: s.label
+    }));
+
+    return {
+      url: primary.url,
+      mime: primary.mime,
+      headers: primary.headers,
+      subtitles: collectedSubtitles.length > 0 ? collectedSubtitles : undefined,
+      alternatives: alternatives.length > 0 ? alternatives : undefined,
+      expiresInSeconds: minExpires
+    };
+  }
+
+  // Plan B.1: Invidious API + streams
+  const invStream = await resolveViaInvidious(videoId);
+  if (invStream) {
+    return invStream;
+  }
+
+  // Plan B.2: Piped API
+  const pipedStream = await resolveViaPiped(videoId);
+  if (pipedStream) {
+    return pipedStream;
+  }
+
+  // Plan B.3: Último recurso directo a través de los mirrors de Invidious (latest_version)
+  const fallbackUrls = INVIDIOUS_MIRRORS.map(inv => ({
+    url: `${inv}/latest_version?id=${videoId}&itag=18`,
+    mime: "video/mp4",
+    headers: { "User-Agent": "Mozilla/5.0" },
+    label: `Invidious (${inv.replace(/^https:\/\//, "")})`
+  }));
+
+  return {
+    url: fallbackUrls[0].url,
+    mime: fallbackUrls[0].mime,
+    headers: fallbackUrls[0].headers,
+    alternatives: fallbackUrls.slice(1)
+  };
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Adaptador Nuvio / lolplus — solo Buscar + Biblioteca + Ajustes
+// (sin Home ni Descubrir)
+// ═══════════════════════════════════════════════════════════════════════════
+
+function getConfig(key, def) {
+  try {
+    if (typeof config !== "undefined" && config && config[key] != null) return config[key];
+    if (typeof userConfig !== "undefined" && userConfig && userConfig[key] != null) return userConfig[key];
+  } catch (e) {}
+  return def;
+}
+
+// Override region/lang from Nuvio repo config
+/* region/lang ya definidos arriba con __readCfg */
+
+// Map Kino search item → Nuvio ContentItem
+function mapToNuvioItem(item) {
+  if (!item) return null;
+  const ref = String(item.ref || item.id || "");
+  let type = "movie";
+  let id = ref;
+  let tmdbId = null;
+
+  if (ref.startsWith("video:") || ref.startsWith("yt-v-")) {
+    const vid = ref.replace(/^video:/, "").replace(/^yt-v-/, "");
+    id = "yt:video:" + vid;
+    type = "movie";
+  } else if (ref.startsWith("playlist:") || (item.kind === "series" && ref.indexOf("playlist") !== -1)) {
+    const pid = ref.replace(/^playlist:/, "");
+    id = "yt:playlist:" + pid;
+    type = "tv";
+  } else if (ref.startsWith("channel:")) {
+    const cid = ref.replace(/^channel:/, "");
+    id = "yt:channel:" + cid;
+    type = "tv";
+  } else if (item.kind === "series") {
+    id = "yt:" + ref;
+    type = "tv";
+  } else {
+    id = "yt:" + (ref || item.id || Math.random().toString(36).slice(2));
+    type = "movie";
+  }
+
+  return {
+    id: id,
+    title: item.title || item.name || "YouTube",
+    name: item.title || item.name || "YouTube",
+    poster: item.poster || item.still || null,
+    backdrop: item.backdrop || item.poster || null,
+    overview: item.overview || item.description || "",
+    description: item.overview || item.description || "",
+    type: type,
+    media_type: type,
+    year: item.year || null,
+    rating: item.rating || null,
+    extra: { ref: ref, youtube: true, kind: item.kind || type }
+  };
+}
+
+/** Solo búsqueda — sin home ni discover */
+async function search(query, opts) {
+  opts = opts || {};
+  let qText = "";
+  if (typeof query === "string") qText = query.trim();
+  else if (query && typeof query === "object") {
+    qText = String(query.q || query.query || query.text || "").trim();
+  }
+  if (!qText) return { items: [], metas: [], results: [] };
+
+  const cursor = (query && typeof query === "object" && query.cursor) ? String(query.cursor) : (opts.cursor || "");
+  let searchType = "video,playlist,channel";
+  if (query && typeof query === "object") {
+    if (query.type === "movie" || query.type === "video") searchType = "video";
+    else if (query.type === "tv" || query.type === "series") searchType = "playlist,channel";
+  }
+
+  try {
+    const page = await fetchItemsByQuery(qText, {
+      searchType: searchType,
+      pageToken: cursor,
+      maxResults: 20
+    });
+    const rawItems = (page && page.items) ? page.items : (Array.isArray(page) ? page : []);
+    const items = rawItems.map(mapToNuvioItem).filter(Boolean);
+    return {
+      items: items,
+      metas: items,
+      results: items,
+      cursor: (page && page.cursor) || null,
+      hasMore: !!(page && page.cursor)
+    };
+  } catch (e) {
+    console.log("[YouTube] search error:", String(e));
+    return { items: [], metas: [], results: [], error: String(e) };
+  }
+}
+
+async function getMeta(id, type) {
+  const raw = String(id || "");
+  let ref = raw;
+  if (raw.startsWith("yt:video:")) ref = "video:" + raw.slice("yt:video:".length);
+  else if (raw.startsWith("yt:playlist:")) ref = "playlist:" + raw.slice("yt:playlist:".length);
+  else if (raw.startsWith("yt:channel:")) ref = "channel:" + raw.slice("yt:channel:".length);
+  else if (raw.startsWith("yt:")) ref = raw.slice(3);
+
+  // Video individual
+  if (ref.startsWith("video:") || (/^[a-zA-Z0-9_-]{11}$/.test(ref))) {
+    const videoId = ref.startsWith("video:") ? ref.slice(6) : ref;
+    let title = "Video de YouTube";
+    let overview = "";
+    let channel = "";
+    try {
+      const data = await ytDataApiFetch("videos", { part: "snippet,contentDetails", id: videoId });
+      const sn = data && data.items && data.items[0] && data.items[0].snippet;
+      if (sn) {
+        title = sn.title || title;
+        overview = sn.description || "";
+        channel = sn.channelTitle || "";
+      }
+    } catch (e) {
+      try {
+        for (const inv of INVIDIOUS_MIRRORS) {
+          const res = await fetch(inv + "/api/v1/videos/" + videoId, {
+            headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" }
+          });
+          if (!res.ok) continue;
+          const v = await res.json();
+          title = v.title || title;
+          overview = v.description || "";
+          channel = v.author || "";
+          break;
+        }
+      } catch (_) {}
+    }
+    return {
+      id: "yt:video:" + videoId,
+      title: title,
+      name: title,
+      poster: "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg",
+      backdrop: "https://i.ytimg.com/vi/" + videoId + "/maxresdefault.jpg",
+      overview: overview,
+      description: overview,
+      type: "movie",
+      media_type: "movie",
+      extra: { ref: "video:" + videoId, channel: channel, youtube: true }
+    };
+  }
+
+  // Playlist / canal → serie con episodios
+  if (ref.startsWith("playlist:") || ref.startsWith("channel:")) {
+    try {
+      const epData = await episodes(ref);
+      const seriesTitle = (epData.series && epData.series.title) || (ref.startsWith("playlist:") ? "Lista de YouTube" : "Canal de YouTube");
+      const eps = (epData.episodes || []).map(function (ep, idx) {
+        const vid = String(ep.ref || "").replace(/^video:/, "");
+        return {
+          episode: ep.number || idx + 1,
+          number: ep.number || idx + 1,
+          id: "yt:video:" + vid,
+          title: ep.title || ("Episodio " + (idx + 1)),
+          name: ep.title || ("Episodio " + (idx + 1)),
+          overview: ep.overview || "",
+          still: ep.still || ("https://i.ytimg.com/vi/" + vid + "/hqdefault.jpg"),
+          backdrop: ep.still || ("https://i.ytimg.com/vi/" + vid + "/hqdefault.jpg")
+        };
+      });
+      return {
+        id: raw.startsWith("yt:") ? raw : ("yt:" + ref.replace(":", ":")),
+        title: seriesTitle,
+        name: seriesTitle,
+        poster: eps[0] ? eps[0].still : null,
+        backdrop: eps[0] ? eps[0].still : null,
+        overview: "Contenido de YouTube",
+        type: "tv",
+        media_type: "tv",
+        seasons: [{
+          season: 1,
+          number: 1,
+          title: "Videos",
+          name: "Videos",
+          episodeCount: eps.length,
+          episodes: eps
+        }],
+        extra: { ref: ref, youtube: true }
+      };
+    } catch (e) {
+      return { id: raw, title: "YouTube", overview: String(e), type: "tv" };
+    }
+  }
+
+  return { id: raw, title: "YouTube", type: "movie", overview: "" };
+}
+
+async function getStreams(id, type, season, episode) {
+  let ref = String(id || "");
+  if (ref.startsWith("yt:video:")) ref = "video:" + ref.slice("yt:video:".length);
+  else if (ref.startsWith("yt:")) ref = ref.slice(3);
+  if (!ref.startsWith("video:") && /^[a-zA-Z0-9_-]{11}$/.test(ref)) ref = "video:" + ref;
+
+  // Si es playlist/channel sin video concreto, no hay stream directo
+  if (ref.startsWith("playlist:") || ref.startsWith("channel:")) {
+    return [];
+  }
+
+  try {
+    const resolved = await resolve(ref);
+    if (!resolved) return [];
+    const streams = [];
+    if (resolved.url) {
+      streams.push({
+        name: "YouTube",
+        title: resolved.mime && resolved.mime.indexOf("mpegurl") !== -1 ? "HLS" : "YouTube",
+        url: resolved.url,
+        quality: "HD",
+        language: getPreferredLang() || "es",
+        server: "YouTube",
+        headers: resolved.headers || null,
+        isHls: !!(resolved.mime && /mpegurl|m3u8/i.test(resolved.mime)),
+        mime: resolved.mime || null
+      });
+    }
+    const alts = resolved.alternatives || [];
+    for (let i = 0; i < alts.length; i++) {
+      const a = alts[i];
+      if (!a || !a.url) continue;
+      streams.push({
+        name: a.label || ("YouTube Alt " + (i + 1)),
+        title: a.label || ("Alt " + (i + 1)),
+        url: a.url,
+        quality: "HD",
+        language: getPreferredLang() || "es",
+        server: a.label || "YouTube",
+        headers: a.headers || null,
+        isHls: !!(a.mime && /mpegurl|m3u8/i.test(a.mime)),
+        mime: a.mime || null
+      });
+    }
+    return streams;
+  } catch (e) {
+    console.log("[YouTube] getStreams error:", String(e));
+    return [];
+  }
+}
+
+// Home / Discover deshabilitados a propósito
+async function getHome() { return { rows: [] }; }
+async function getCatalogs() { return { catalogs: [] }; }
+async function getCatalog() { return { items: [], metas: [], results: [] }; }
+async function getDiscover() { return { items: [], metas: [], results: [] }; }
+async function getDiscoverFilters() { return []; }
+
+var addon = {
+  search: search,
+  getMeta: getMeta,
+  getStreams: getStreams,
+  getHome: getHome,
+  getCatalogs: getCatalogs,
+  getCatalog: getCatalog,
+  getDiscover: getDiscover,
+  getDiscoverFilters: getDiscoverFilters
 };
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = addon;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.search = search;
+  globalThis.getMeta = getMeta;
+  globalThis.getStreams = getStreams;
+  globalThis.getHome = getHome;
+  globalThis.getCatalogs = getCatalogs;
+  globalThis.getCatalog = getCatalog;
+  globalThis.getDiscover = getDiscover;
+  globalThis.getDiscoverFilters = getDiscoverFilters;
+}
