@@ -1,34 +1,42 @@
 {
-  "id": "futbol-libre",
-  "name": "Fútbol Libre",
-  "version": "1.0.0",
-  "description": "Partidos de hoy y canales deportivos en vivo. Agenda con varios sitios de respaldo y servidores espejo.",
-  "author": "xuper-plugin",
-  "logo": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-futbol-libre/main/icon.png",
-  "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-futbol-libre/main/icon.png",
+  "id": "youtube-player-nuvio",
+  "name": "YouTube",
+  "version": "1.0.1",
+  "description": "Busca y reproduce videos de YouTube (Invidious/Piped). Solo Buscar, Biblioteca y Ajustes.",
+  "author": "adaptado de stanpx/youtube-kino-plugin",
+  "icon": "icon.png",
+  "logo": "icon.png",
   "entry": "plugin.js",
-  "main": "plugin.js",
-  "capabilities": ["home", "search", "streams", "live", "channel"],
-  "types": ["channel", "live"],
-  "categories": ["live", "sports"],
-  "language": "es",
-  "color": "#2EE6A6",
-  "background": "#06100B",
+  "capabilities": ["search", "meta", "streams"],
+  "tabs": ["search", "library", "settings"],
+  "languages": ["es", "en"],
+  "theme": {
+    "accent": "#FF0000",
+    "background": "#0E0E0E",
+    "surface": "#181818"
+  },
   "config": [
     {
-      "key": "utcOffset",
-      "type": "select",
-      "label": "Mi zona horaria",
-      "description": "Para mostrar la hora de cada partido",
-      "default": "-5",
-      "options": [
-        { "value": "-8", "label": "California (UTC-8)" },
-        { "value": "-6", "label": "México, Centroamérica (UTC-6)" },
-        { "value": "-5", "label": "Colombia, Perú, Ecuador (UTC-5)" },
-        { "value": "-4", "label": "Venezuela, Bolivia (UTC-4)" },
-        { "value": "-3", "label": "Argentina, Uruguay, Brasil (UTC-3)" },
-        { "value": "1", "label": "España (UTC+1)" }
-      ]
+      "key": "api_key",
+      "label": "YouTube Data API v3 Key (opcional)",
+      "type": "password",
+      "description": "Clave AIzaSy... de Google Cloud. Sin ella usa Invidious/Piped.",
+      "default": "",
+      "placeholder": "AIzaSy..."
+    },
+    {
+      "key": "region_code",
+      "label": "Código de región (ISO)",
+      "type": "text",
+      "default": "MX",
+      "placeholder": "MX, ES, AR, US"
+    },
+    {
+      "key": "preferred_lang",
+      "label": "Idioma preferido",
+      "type": "text",
+      "default": "es",
+      "placeholder": "es, es-419, en"
     }
   ]
 }
