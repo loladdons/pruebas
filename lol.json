@@ -1,6 +1,6 @@
 
 {
-  "id": "tmdb-full-catalog",
+  "id": "tmdb-ful",
   "name": "TMDB Full Catalog",
   "version": "1.3.5",
   "description": "Catálogo TMDB: Novedades con películas recién en VOD digital y series nuevas, géneros, franquicias, directores/actores; extractores con toggles persistentes.",
