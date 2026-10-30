@@ -1,42 +1,350 @@
+
 {
-  "id": "youtube-player-nuvio",
-  "name": "YouTube",
-  "version": "1.0.1",
-  "description": "Busca y reproduce videos de YouTube (Invidious/Piped). Solo Buscar, Biblioteca y Ajustes.",
-  "author": "adaptado de stanpx/youtube-kino-plugin",
-  "icon": "icon.png",
-  "logo": "icon.png",
+  "id": "tmdb-full-catalog",
+  "name": "TMDB Full Catalog",
+  "version": "1.3.5",
+  "description": "Catálogo TMDB: Novedades con películas recién en VOD digital y series nuevas, géneros, franquicias, directores/actores; extractores con toggles persistentes.",
+  "author": "community",
+  "repo": "tmdb-full-catalog",
   "entry": "plugin.js",
-  "capabilities": ["search", "meta", "streams"],
-  "tabs": ["search", "library", "settings"],
-  "languages": ["es", "en"],
+  "main": "plugin.js",
+  "icon": "icon.png",
+  "banner": "https://image.tmdb.org/t/p/w1280/uDgy6hyPd82kOHh6e0smXGXwPOe.jpg",
+  "color": "#01B4E4",
+  "apiVersion": 6,
+  "browser": false,
+  "section": {
+    "label": "TMDB Full"
+  },
+  "languages": [
+    "es",
+    "es-MX",
+    "es-ES",
+    "en"
+  ],
+  "capabilities": [
+    "home",
+    "discover",
+    "search",
+    "meta",
+    "streams",
+    "catalogs"
+  ],
+  "tabs": [
+    "home",
+    "discover",
+    "search",
+    "library",
+    "settings"
+  ],
+  "newsImageStyle": "banner",
+  "episodesPagination": {
+    "enabled": true,
+    "perPage": 40
+  },
   "theme": {
-    "accent": "#FF0000",
-    "background": "#0E0E0E",
-    "surface": "#181818"
+    "accent": "#01B4E4",
+    "onAccent": "#FFFFFF",
+    "background": "#0B0E14",
+    "surface": "#1A222D",
+    "highlight": "#7DD3FC"
   },
   "config": [
     {
-      "key": "api_key",
-      "label": "YouTube Data API v3 Key (opcional)",
-      "type": "password",
-      "description": "Clave AIzaSy... de Google Cloud. Sin ella usa Invidious/Piped.",
+      "key": "tmdb_api_key",
+      "label": "API Key TMDB (opcional)",
+      "type": "text",
       "default": "",
-      "placeholder": "AIzaSy..."
+      "placeholder": "Vacío = clave del addon",
+      "description": "Tu propia API key de themoviedb.org si la tienes."
     },
     {
-      "key": "region_code",
-      "label": "Código de región (ISO)",
+      "key": "tmdb_lang",
+      "label": "Idioma de metadatos",
+      "type": "select",
+      "default": "es-MX",
+      "description": "Idioma de títulos y descripciones.",
+      "options": [
+        {
+          "id": "es-MX",
+          "label": "Español (México)"
+        },
+        {
+          "id": "es-ES",
+          "label": "Español (España)"
+        },
+        {
+          "id": "en-US",
+          "label": "English"
+        }
+      ]
+    },
+    {
+      "key": "image_quality",
+      "label": "Calidad de posters",
+      "type": "select",
+      "default": "w500",
+      "options": [
+        {
+          "id": "w185",
+          "label": "Baja (w185)"
+        },
+        {
+          "id": "w342",
+          "label": "Media (w342)"
+        },
+        {
+          "id": "w500",
+          "label": "Alta (w500)"
+        },
+        {
+          "id": "w780",
+          "label": "Muy alta (w780)"
+        },
+        {
+          "id": "original",
+          "label": "Original"
+        }
+      ]
+    },
+    {
+      "key": "backdrop_quality",
+      "label": "Calidad de backdrops",
+      "type": "select",
+      "default": "w1280",
+      "options": [
+        {
+          "id": "w780",
+          "label": "w780"
+        },
+        {
+          "id": "w1280",
+          "label": "w1280"
+        },
+        {
+          "id": "original",
+          "label": "Original"
+        }
+      ]
+    },
+    {
+      "key": "region",
+      "label": "Región TMDB",
       "type": "text",
       "default": "MX",
-      "placeholder": "MX, ES, AR, US"
+      "placeholder": "ES, MX, US, AR…"
     },
     {
-      "key": "preferred_lang",
-      "label": "Idioma preferido",
+      "key": "exclude_in_theater",
+      "label": "Ocultar solo-en-cines (solo digital)",
+      "type": "select",
+      "default": "true",
+      "description": "No listar títulos que aún no tienen versión digital.",
+      "options": [
+        {
+          "id": "true",
+          "label": "Sí, solo digital"
+        },
+        {
+          "id": "false",
+          "label": "No, mostrar también cines"
+        }
+      ]
+    },
+    {
+      "key": "include_theater",
+      "label": "Mostrar fila En cines en Home",
+      "type": "select",
+      "default": "false",
+      "options": [
+        {
+          "id": "true",
+          "label": "Mostrar"
+        },
+        {
+          "id": "false",
+          "label": "Ocultar"
+        }
+      ]
+    },
+    {
+      "key": "only_digital",
+      "label": "Solo fechas ya lanzadas",
+      "type": "select",
+      "default": "true",
+      "options": [
+        {
+          "id": "true",
+          "label": "Sí"
+        },
+        {
+          "id": "false",
+          "label": "No"
+        }
+      ]
+    },
+    {
+      "key": "hide_unreleased_eps",
+      "label": "Ocultar capítulos no estrenados",
+      "type": "select",
+      "default": "true",
+      "options": [
+        {
+          "id": "true",
+          "label": "Sí"
+        },
+        {
+          "id": "false",
+          "label": "No"
+        }
+      ]
+    },
+    {
+      "key": "max_concurrent_sources",
+      "label": "Extractores en paralelo",
+      "type": "number",
+      "default": "4"
+    },
+    {
+      "key": "source_embed69",
+      "label": "embed69",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor embed69"
+    },
+    {
+      "key": "source_homecine",
+      "label": "homecine",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor homecine"
+    },
+    {
+      "key": "source_seriesmetro",
+      "label": "seriesmetro",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor seriesmetro"
+    },
+    {
+      "key": "source_cinecalidad",
+      "label": "cinecalidad",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor cinecalidad"
+    },
+    {
+      "key": "source_verpelis",
+      "label": "verpelis",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor verpelis"
+    },
+    {
+      "key": "source_vimeus",
+      "label": "vimeus",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor vimeus"
+    },
+    {
+      "key": "source_lamovie",
+      "label": "lamovie",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor lamovie"
+    },
+    {
+      "key": "source_elifilms",
+      "label": "elifilms",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor elifilms"
+    },
+    {
+      "key": "source_tioplus",
+      "label": "tioplus",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor tioplus"
+    },
+    {
+      "key": "source_cine24h",
+      "label": "cine24h",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor cine24h"
+    },
+    {
+      "key": "source_cinemitas",
+      "label": "cinemitas",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor cinemitas"
+    },
+    {
+      "key": "source_hackstore",
+      "label": "hackstore",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor hackstore"
+    },
+    {
+      "key": "source_areshd",
+      "label": "areshd",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor areshd"
+    },
+    {
+      "key": "source_sololatino",
+      "label": "sololatino",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor sololatino"
+    },
+    {
+      "key": "source_pelisgratishd",
+      "label": "pelisgratishd",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor pelisgratishd"
+    },
+    {
+      "key": "source_peliculasflix",
+      "label": "peliculasflix",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor peliculasflix"
+    },
+    {
+      "key": "source_entrepeliculasyseries",
+      "label": "entrepeliculasyseries",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor entrepeliculasyseries"
+    },
+    {
+      "key": "source_pelisgo",
+      "label": "pelisgo",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor pelisgo"
+    },
+    {
+      "key": "source_fuegocine",
+      "label": "fuegocine",
+      "type": "toggle",
+      "default": true,
+      "description": "Activar servidor/extractor fuegocine"
+    },
+    {
+      "key": "enabled_sources",
+      "label": "Override extractores (coma, opcional)",
       "type": "text",
-      "default": "es",
-      "placeholder": "es, es-419, en"
+      "default": "",
+      "placeholder": "Vacío = usar checkboxes",
+      "description": "Si lo rellenas, ignora los checkboxes y usa solo esta lista separada por comas."
     }
   ]
 }
