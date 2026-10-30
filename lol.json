@@ -1,15 +1,34 @@
 {
-  "id": "iptv.m3u.live",
-  "name": "IPTV M3U Live",
-  "version": "1.0.1",
-  "description": "Canales en vivo desde lista M3U. Agrupa por group-title.",
-  "author": "loladdons",
-  "logo": "https://raw.githubusercontent.com/ice-dev-x/kino-iptv-org-clean/main/icon.png",
-  "repo": "local/iptv-m3u-live",
-  "type": "tvchannel",
-   "entry": "plugin.js",
+  "id": "futbol-libre",
+  "name": "Fútbol Libre",
+  "version": "1.0.0",
+  "description": "Partidos de hoy y canales deportivos en vivo. Agenda con varios sitios de respaldo y servidores espejo.",
+  "author": "xuper-plugin",
+  "logo": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-futbol-libre/main/icon.png",
+  "icon": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-futbol-libre/main/icon.png",
+  "entry": "plugin.js",
   "main": "plugin.js",
-  "topics": ["lol_tvchanel", "iptv", "live", "m3u"],
-  "capabilities": ["home", "search", "meta", "streams", "live", "channel", "iptv"],
-  "config": []
+  "capabilities": ["home", "search", "streams", "live", "channel"],
+  "types": ["channel", "live"],
+  "categories": ["live", "sports"],
+  "language": "es",
+  "color": "#2EE6A6",
+  "background": "#06100B",
+  "config": [
+    {
+      "key": "utcOffset",
+      "type": "select",
+      "label": "Mi zona horaria",
+      "description": "Para mostrar la hora de cada partido",
+      "default": "-5",
+      "options": [
+        { "value": "-8", "label": "California (UTC-8)" },
+        { "value": "-6", "label": "México, Centroamérica (UTC-6)" },
+        { "value": "-5", "label": "Colombia, Perú, Ecuador (UTC-5)" },
+        { "value": "-4", "label": "Venezuela, Bolivia (UTC-4)" },
+        { "value": "-3", "label": "Argentina, Uruguay, Brasil (UTC-3)" },
+        { "value": "1", "label": "España (UTC+1)" }
+      ]
+    }
+  ]
 }
