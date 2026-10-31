@@ -1,3 +1,4 @@
+
 /*
  * Magis Service Catalog - optimizado + fixes:
  *  - Discover: filtros tipo + categoría funcionan juntos (no solo el primero)
@@ -34,9 +35,10 @@ const FIXED_MAC = '02:00:00:00:00:00';
 const HOME = { movies: 'masnew_movies', series: 'masnew_series', anime: 'masnew_anime', featured: 'masnew_featured' };
 const ROOT = { movies: '76263', series: '76235', anime: '76209' };
 
-// Gap mínimo entre POSTs al portal. 300 ms serializaba demasiado el Home en paralelo lógico.
-const RATE_GAP_MS = 100;
-const PORTAL_TIMEOUT_MS = 6500;
+// Gap mínimo entre POSTs al portal (más bajo = menos espera en Home frío).
+const RATE_GAP_MS = 60;
+// Fallar rápido si el host no responde → pasar a fallback (series/anime).
+const PORTAL_TIMEOUT_MS = 4000;
 
 let session = null;
 let sessionPromise = null;
@@ -554,30 +556,64 @@ async function homeRows(kind) {
   const code = HOME[kind] || HOME.movies;
   const forcedType = kind === 'series' ? 'series' : kind === 'anime' ? 'anime' : 'movie';
   return cached('homeRows:' + kind, CACHE_TTL.getHome, async () => {
-    // 1) getHome (path feliz). Si responde, no hay más red.
-    try {
-      const data = await api('getHome', { homePageCode: code, version: '' });
-      const rows = normalizeRows(data, kindLabel(kind), forcedType);
-      if (rows.length) {
-        categoryKindsFromRows(rows, kind);
-        return trimHomeRows(rows);
-      }
-    } catch (e) {
-      // Timeout: no cadena de fallbacks (evita 2–3 round-trips × 3 kinds en frío)
-      if (timeoutError(e)) return [];
-    }
-    // 2) Un solo fallback ligero. Sin getShelveData en Home (Discover ya pagina ROOT).
+    // Orden pensado para series/anime (getHome a menudo vacío/timeout en esos kinds):
+    // 1) getNextColumns → filas + columnIds de categorías (como Kino)
+    // 2) getHome
+    // 3) ROOT getShelveData → al menos una fila con ítems
     try {
       const data = await api('getNextColumns', {
         columnCode: code,
         pageNum: 1,
-        pageSize: 6,
+        pageSize: 10,
         version: ''
       });
       const rows = normalizeRows(data, kindLabel(kind), forcedType);
       if (rows.length) {
         categoryKindsFromRows(rows, kind);
+        for (const row of rows) rememberCategoryRow(row, kind);
         return trimHomeRows(rows);
+      }
+    } catch (_) {}
+
+    try {
+      const data = await api('getHome', { homePageCode: code, version: '' });
+      const rows = normalizeRows(data, kindLabel(kind), forcedType);
+      if (rows.length) {
+        categoryKindsFromRows(rows, kind);
+        for (const row of rows) rememberCategoryRow(row, kind);
+        return trimHomeRows(rows);
+      }
+    } catch (_) {}
+
+    try {
+      const rootId = ROOT[kind] || ROOT.movies;
+      const data = await api('v3/getShelveData', {
+        columnId: Number(rootId) || rootId,
+        columnType: '2',
+        pageNum: 1,
+        pageSize: HOME_MAX_ITEMS_PER_ROW,
+        encryptVersion: 0
+      });
+      let items = [];
+      if (Array.isArray(data.assetList)) {
+        items = data.assetList
+          .filter(x => x && typeof x === 'object')
+          .map(x => normalizeItem(x, forcedType));
+      }
+      if (!items.length) items = flattenItems(data, forcedType);
+      items = unique(items).slice(0, HOME_MAX_ITEMS_PER_ROW);
+      if (items.length) {
+        const row = {
+          id: String(rootId),
+          code,
+          shelveId: String(rootId),
+          title: kindLabel(kind),
+          name: kindLabel(kind),
+          items
+        };
+        categoryKindsFromRows([row], kind);
+        rememberCategoryRow(row, kind);
+        return [row];
       }
     } catch (_) {}
     return [];
@@ -722,26 +758,29 @@ async function categoryRows(kind) {
   const forcedType = kind === 'series' ? 'series' : kind === 'anime' ? 'anime' : 'movie';
   // Cache dedicada: filtros Discover no deben repetir getNextColumns al cambiar de página
   return cached('categoryRows:' + kind, CACHE_TTL.getNextColumns, async () => {
-    // Reutilizar filas de Home ya en memoria (0 red)
+    // Reutilizar filas de Home solo si traen columnId numérico (sirve para filtros)
     const homeHit = responseCache.get('homeRows:' + kind);
     if (homeHit && homeHit.expires > Date.now() && Array.isArray(homeHit.value) && homeHit.value.length) {
-      const fromHome = homeHit.value.filter(r => r.id || r.code || (r.items && r.items.length));
-      if (fromHome.length) {
+      const fromHome = homeHit.value.filter(r => {
+        const sid = String(r.shelveId || (/^\d+$/.test(String(r.id || '')) ? r.id : ''));
+        return sid && /^\d+$/.test(sid);
+      });
+      if (fromHome.length >= 2) {
         categoryKindsFromRows(fromHome, kind);
         for (const row of fromHome) rememberCategoryRow(row, kind);
         return fromHome;
       }
     }
-    // Solo nombres/IDs de categoría → pageSize bajo
+    // Árbol completo de categorías (pageSize más alto → más opciones en el filtro)
     try {
       const data = await api('getNextColumns', {
         columnCode: code,
         pageNum: 1,
-        pageSize: 8,
+        pageSize: 20,
         version: ''
       });
       const rows = normalizeRows(data, kindLabel(kind), forcedType);
-      const usable = rows.filter(r => (r.items && r.items.length) || r.id || r.code);
+      const usable = rows.filter(r => (r.items && r.items.length) || r.id || r.code || r.shelveId);
       if (usable.length) {
         categoryKindsFromRows(usable, kind);
         for (const row of usable) rememberCategoryRow(row, kind);
@@ -793,20 +832,19 @@ async function _getDiscoverFilters(filters) {
       });
     }
   }
-  if (!options.length) {
-    for (const k of kinds) {
-      const rootId = String(ROOT[k] || ROOT.movies);
-      if (seen.has(rootId)) continue;
-      seen.add(rootId);
-      categoryKinds.set(rootId, k);
-      options.push({
-        id: rootId,
-        label: kindLabel(k),
-        columnId: rootId,
-        columnCode: HOME[k] || '',
-        type: k === 'movies' ? 'movie' : k
-      });
-    }
+  // Siempre incluir ROOT de cada kind (Todos / raíz) para series y animación
+  for (const k of kinds) {
+    const rootId = String(ROOT[k] || ROOT.movies);
+    if (seen.has(rootId)) continue;
+    seen.add(rootId);
+    categoryKinds.set(rootId, k);
+    options.unshift({
+      id: rootId,
+      label: kindLabel(k) + ' (Todos)',
+      columnId: rootId,
+      columnCode: HOME[k] || '',
+      type: k === 'movies' ? 'movie' : k
+    });
   }
   return [
     { id: 'type', name: 'Tipo', label: 'Tipo', type: 'select', options: types },
