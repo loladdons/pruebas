@@ -1,4 +1,3 @@
-
 /*
  * Magis Service Catalog - optimizado + fixes:
  *  - Discover: filtros tipo + categoría funcionan juntos (no solo el primero)
@@ -505,6 +504,43 @@ function unique(items) {
   });
 }
 
+/** Ítem mínimo para listas (Home / Descubrir): id + título + imágenes + tipo para abrir ficha */
+function slimListItem(it, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const withBackdrop = o.withBackdrop !== false;
+  const id = String(it.contentId || it.id || '').trim();
+  const type = it.type === 'anime' || it.media_type === 'anime'
+    ? 'anime'
+    : (it.type === 'series' || it.media_type === 'series' || it.programType === 'series' || it.programType === 'teleplay')
+      ? 'series'
+      : (it.type === 'movie' || it.media_type === 'movie' ? 'movie' : (itemType(it) || 'movie'));
+  const title = String(it.title || it.name || id || 'Sin título');
+  const poster = String(it.poster || it.image || '').trim();
+  const backdrop = String(it.backdrop || it.background || poster).trim();
+  const out = {
+    id,
+    contentId: id,
+    title,
+    name: title,
+    type,
+    media_type: type,
+    programType: type === 'series' ? 'series' : type === 'anime' ? 'anime' : 'movie',
+    poster,
+    image: poster || backdrop
+  };
+  if (withBackdrop) {
+    out.backdrop = backdrop || poster;
+    out.background = backdrop || poster;
+  }
+  if (it.year) out.year = it.year;
+  if (id) {
+    itemKinds.set(id, type);
+    limitMap(itemKinds, MAX_MAP);
+  }
+  return out;
+}
+
+
 function categoryKindsFromRows(rows, kind) {
   for (const row of rows) {
     if (row.id) {
@@ -675,38 +711,56 @@ async function _getNews() {
 }
 
 async function _getHome() {
-  // Solo las 3 homeRows en frío (sin getRecommends extra). News se arma desde los ítems ya traídos.
-  const kinds = ['movies', 'series', 'anime'];
-  const results = await Promise.all(kinds.map(k => homeRows(k).catch(() => [])));
-  const rows = [];
-  const pool = [];
-  for (let i = 0; i < kinds.length; i++) {
-    const kind = kinds[i];
-    for (const row of results[i] || []) {
-      if (Array.isArray(row.items)) pool.push(...row.items);
-      rows.push(Object.assign({}, row, {
-        type: 'row',
-        categoryType: kind === 'movies' ? 'movie' : kind,
-        category: row.title,
-        // Home sigue en banner horizontal
-        imageStyle: 'backdrop'
-      }));
+  // Home ligero: 1 hero (slider) + 3 filas ROOT (últimas películas / series / animación).
+  // Una sola página getShelveData por kind (no todo el árbol de categorías).
+  const specs = [
+    { kind: 'movies', root: ROOT.movies, title: 'Últimas películas', type: 'movie', forced: 'movie' },
+    { kind: 'series', root: ROOT.series, title: 'Últimas series', type: 'series', forced: 'series' },
+    { kind: 'anime', root: ROOT.anime, title: 'Últimas animaciones', type: 'anime', forced: 'anime' }
+  ];
+  const pageSize = HOME_MAX_ITEMS_PER_ROW;
+
+  const pages = await Promise.all(specs.map(async (s) => {
+    try {
+      const page = await fetchShelvePage(s.root, s.forced, 1, pageSize);
+      const items = unique(page.items || [])
+        .slice(0, pageSize)
+        .map(it => slimListItem(it, { withBackdrop: true }));
+      return { spec: s, items };
+    } catch (_) {
+      return { spec: s, items: [] };
     }
+  }));
+
+  const rows = [];
+  const heroPool = [];
+
+  for (const { spec, items } of pages) {
+    if (!items.length) continue;
+    // Mezcla para el slider principal
+    heroPool.push(...items.slice(0, 4));
+    rows.push({
+      id: String(spec.root),
+      code: HOME[spec.kind] || '',
+      shelveId: String(spec.root),
+      title: spec.title,
+      name: spec.title,
+      type: 'row',
+      categoryType: spec.type,
+      category: spec.title,
+      imageStyle: 'poster',
+      items
+    });
   }
+
   const limit = Math.max(1, Math.min(8, parseInt(config().newsLimit, 10) || 8));
-  const newsItems = unique(pool).slice(0, limit).map((it, i) => {
-    const poster = String(it.poster || it.image || it.backdrop || '').trim();
-    const backdrop = String(it.backdrop || it.background || it.poster || it.image || '').trim();
-    return Object.assign({}, it, {
+  const newsItems = unique(heroPool).slice(0, limit).map((it, i) =>
+    Object.assign({}, slimListItem(it, { withBackdrop: true }), {
       section: 'novedades',
       news: true,
-      newsRank: i + 1,
-      poster,
-      image: poster || backdrop,
-      backdrop: backdrop || poster,
-      background: backdrop || poster
-    });
-  });
+      newsRank: i + 1
+    })
+  );
   if (newsItems.length) {
     rows.unshift({
       id: 'novedades',
@@ -739,12 +793,12 @@ async function getCatalog(catalogId, options) {
 function rememberCategoryRow(row, kind) {
   const key = String(row.id || row.code || '');
   if (!key) return;
+  // Solo metadatos de categoría (sin assetList completo) — el listado se pide al seleccionar
   const entry = {
-    items: unique(row.items || []),
+    items: [],
     kind,
     title: row.title || row.name || key,
     code: row.code || '',
-    // columnId numérico para paginar con getShelveData (lista completa)
     shelveId: row.shelveId || (/^\d+$/.test(key) ? key : '')
   };
   categoryItemsCache.set(key, entry);
@@ -780,7 +834,16 @@ async function categoryRows(kind) {
         version: ''
       });
       const rows = normalizeRows(data, kindLabel(kind), forcedType);
-      const usable = rows.filter(r => (r.items && r.items.length) || r.id || r.code || r.shelveId);
+      const usable = rows
+        .filter(r => r.id || r.code || r.shelveId || (r.items && r.items.length))
+        .map(r => ({
+          id: r.id,
+          code: r.code || '',
+          shelveId: r.shelveId || (/^\d+$/.test(String(r.id || '')) ? String(r.id) : ''),
+          title: r.title || r.name || '',
+          name: r.name || r.title || '',
+          items: []
+        }));
       if (usable.length) {
         categoryKindsFromRows(usable, kind);
         for (const row of usable) rememberCategoryRow(row, kind);
@@ -884,19 +947,9 @@ async function fetchShelvePage(columnId, forcedType, page, pageSize) {
       if (!items.length) items = flattenItems(data, forcedType);
       items = unique(items).map(it => {
         const t = forcedType || itemType(it);
-        if (it.id) {
-          itemKinds.set(it.id, t);
-          limitMap(itemKinds, MAX_MAP);
-        }
-        // Descubrir: posters verticales (no banner)
-        const poster = it.poster || it.image || it.backdrop || '';
-        return Object.assign({}, it, {
-          type: t,
-          media_type: t,
-          poster,
-          image: poster,
-          imageStyle: 'poster'
-        });
+        const slim = slimListItem(Object.assign({}, it, { type: t }), { withBackdrop: false });
+        slim.imageStyle = 'poster';
+        return slim;
       });
       const totalRaw = data.assetListTotalSize ?? data.listTotalSize ?? data.totalSize ?? data.total ?? data.count;
       const pageItems = items.length > pageSize ? items.slice(0, pageSize) : items;
@@ -974,15 +1027,13 @@ async function _getDiscover(options) {
     shelveId = String(ROOT[rootKey] || ROOT.movies);
   }
 
+  // Solo la categoría seleccionada (o ROOT si no hay filtro). No precarga otras categorías.
   const pageResult = await fetchShelvePage(shelveId, forcedType, page, pageSize);
   if (pageResult.items.length || pageResult.hasMore) {
     pageResult.items = (pageResult.items || []).map(it => {
-      const poster = it.poster || it.image || '';
-      return Object.assign({}, it, {
-        poster,
-        image: poster,
-        imageStyle: 'poster'
-      });
+      const slim = slimListItem(it, { withBackdrop: false });
+      slim.imageStyle = 'poster';
+      return slim;
     });
     return pageResult;
   }
@@ -992,8 +1043,9 @@ async function _getDiscover(options) {
     const rootPage = await fetchShelvePage(rootId, forcedType, page, pageSize);
     if (rootPage.items.length || rootPage.hasMore) {
       rootPage.items = (rootPage.items || []).map(it => {
-        const poster = it.poster || it.image || '';
-        return Object.assign({}, it, { poster, image: poster, imageStyle: 'poster' });
+        const slim = slimListItem(it, { withBackdrop: false });
+        slim.imageStyle = 'poster';
+        return slim;
       });
       return rootPage;
     }
