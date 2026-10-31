@@ -1,7 +1,7 @@
 {
   "id": "magis-service-catalog",
   "name": "XuperTv",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "entry": "plugin.js",
   "icon": "icon.png",
   "author": "JostinSantos",
