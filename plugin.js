@@ -1,4 +1,3 @@
-
 /*
  * Magis Service Catalog — estilo Kino (liviano)
  *
@@ -877,6 +876,38 @@ function unwrapDetail(response) {
   return data && typeof data === 'object' ? data : {};
 }
 
+/** Extrae poster (vertical) y backdrop (horizontal) del asset Magis. */
+function imagesFromAsset(data) {
+  let poster = '';
+  let backdrop = '';
+  const loosePoster = String(data && (data.poster || data.posterUrl || data.pic || data.cover || data.image) || '').trim();
+  const looseBack = String(data && (data.backdrop || data.backdropUrl || data.background || data.banner) || '').trim();
+  if (loosePoster) poster = loosePoster;
+  if (looseBack) backdrop = looseBack;
+  const list = (data && (data.posterList || data.posters || data.imageList)) || [];
+  if (Array.isArray(list)) {
+    for (const img of list) {
+      if (!img || typeof img !== 'object') continue;
+      const kind = String(img.fileType || img.type || '').toLowerCase();
+      const url = String(img.fileUrl || img.url || img.picUrl || '').trim();
+      if (!url) continue;
+      if (['v_poster', 'icon', 'cover', 'thumb', 'vertical'].includes(kind)) {
+        if (!poster) poster = url;
+      } else if (['poster', 'h_poster', 'backdrop', 'background', 'banner', 'horizontal'].includes(kind)) {
+        if (!backdrop) backdrop = url;
+      } else if (!poster) {
+        poster = url;
+      } else if (!backdrop) {
+        backdrop = url;
+      }
+    }
+  }
+  // Si solo hay uno, reutilizarlo (la UI de detalle necesita backdrop)
+  if (!backdrop && poster) backdrop = poster;
+  if (!poster && backdrop) poster = backdrop;
+  return { poster, backdrop };
+}
+
 function parseSeasonFromName(name) {
   const m = String(name || '').match(/(?:temporada|season|temp\.?|\bT|\bS)\s*(\d+)/i);
   return m ? Number(m[1]) : 0;
@@ -1258,6 +1289,7 @@ async function _getMeta(id, options) {
     }
     const detailTitleForSeason = String(data.name || data.viewPoint || data.alias || data.title || '');
     const defaultSeason = Number(data.seasonNumber || data.season || parseSeasonFromName(detailTitleForSeason) || 1) || 1;
+    // Episodios SOLO de este contentId (la temporada a la que entró)
     const simple = episodeRows(data, contentId, defaultSeason, contentId);
     seasonContentIds.set(`${contentId}:${defaultSeason}`, contentId);
 
@@ -1277,6 +1309,33 @@ async function _getMeta(id, options) {
     item.overview = item.description;
     item.details = data;
 
+    // Backdrop / poster: forzar desde posterList del portal (muchas fichas solo traen ahí el horizontal)
+    const imgs = imagesFromAsset(data);
+    if (imgs.poster) {
+      item.poster = imgs.poster;
+      item.image = imgs.poster;
+    }
+    if (imgs.backdrop) {
+      item.backdrop = imgs.backdrop;
+      item.background = imgs.backdrop;
+    } else if (item.poster) {
+      item.backdrop = item.poster;
+      item.background = item.poster;
+    }
+    // Si el seed (tarjeta de lista) traía backdrop y el detalle no, conservarlo
+    if (seed) {
+      const seedBack = String(seed.backdrop || seed.background || '').trim();
+      const seedPoster = String(seed.poster || seed.image || '').trim();
+      if (!item.backdrop && seedBack) {
+        item.backdrop = seedBack;
+        item.background = seedBack;
+      }
+      if (!item.poster && seedPoster) {
+        item.poster = seedPoster;
+        item.image = seedPoster;
+      }
+    }
+
     // Guardar imdb del portal si viene
     const portalImdb = String(data.keyWords || data.imdbId || data.imdb || '').trim();
     if (/^tt\d{7,}$/i.test(portalImdb)) {
@@ -1289,48 +1348,92 @@ async function _getMeta(id, options) {
     const currentSeason = Number(data.seasonNumber || data.season || parseSeasonFromName(item.title) || defaultSeason || 1) || 1;
     const siblings = Array.isArray(data.sameSeasonSeriesList) ? data.sameSeasonSeriesList : [];
 
-    // ─── CLAVE KINO: solo temporada actual con episodios ───
-    // Las demás temporadas son chips (id + number + name), SIN getItemData extra
+    // Serie completa en chips; episodios SOLO de la temporada actual (la que abrió).
+    // Ej: entro a Halo T2 → seasons = [T1 chip vacío, T2 con episodios, T3 chip…]
+    //     item.episodes = solo capítulos de T2.
     const seasons = [];
     if (isSeries) {
-      seasons.push({
+      const used = new Set();
+      const byNumber = new Map();
+
+      // 1) Temporada actual: única con episodios cargados
+      const currentEps = simple.slice().sort((a, b) => a.number - b.number);
+      byNumber.set(currentSeason, {
         number: currentSeason,
         season: currentSeason,
         name: `Temporada ${currentSeason}`,
         title: `Temporada ${currentSeason}`,
-        episodes: simple.sort((a, b) => a.number - b.number),
-        contentId: contentId
+        episodes: currentEps,
+        contentId: contentId,
+        current: true
       });
+      used.add(currentSeason);
+      seasonContentIds.set(`${contentId}:${currentSeason}`, contentId);
 
-      // Chips de siblings (sin cargar episodios)
-      const used = new Set([currentSeason]);
+      // 2) Resto de la serie desde sameSeasonSeriesList (sin pedir getItemData)
       let auto = 1;
       for (const sibling of siblings) {
         const sid = String(sibling.contentId || sibling.id || '').trim();
-        if (!sid || sid === contentId) continue;
+        if (!sid) continue;
         let sn = Number(sibling.seasonNumber || sibling.season || parseSeasonFromName(sibling.name || sibling.title || '') || 0) || 0;
+        if (sid === contentId) {
+          // Es la misma ficha: asegurar número y nombre
+          if (sn > 0 && sn !== currentSeason && !used.has(sn)) {
+            // rarísimo; ignorar conflicto
+          }
+          continue;
+        }
         if (!sn || used.has(sn)) {
           while (used.has(auto)) auto++;
           sn = auto;
         }
         used.add(sn);
-        auto = sn + 1;
-        seasons.push({
-          number: sn,
-          season: sn,
-          name: String(sibling.name || sibling.viewPoint || sibling.title || `Temporada ${sn}`),
-          title: String(sibling.name || sibling.viewPoint || sibling.title || `Temporada ${sn}`),
-          episodes: [], // vacío — se carga bajo demanda
-          contentId: sid
-        });
-        seasonContentIds.set(`${item.id}:${sn}`, sid);
+        auto = Math.max(auto, sn + 1);
+        if (!byNumber.has(sn)) {
+          byNumber.set(sn, {
+            number: sn,
+            season: sn,
+            name: String(sibling.name || sibling.viewPoint || sibling.title || `Temporada ${sn}`),
+            title: String(sibling.name || sibling.viewPoint || sibling.title || `Temporada ${sn}`),
+            episodes: [], // vacías: se cargan al elegir esa temporada / al reproducir
+            contentId: sid,
+            current: false
+          });
+        }
+        seasonContentIds.set(`${contentId}:${sn}`, sid);
         seasonContentIds.set(`${sid}:${sn}`, sid);
+        // También indexar bajo cada sibling para resolve
+        seasonContentIds.set(`${sid}:${currentSeason}`, contentId);
       }
+
+      for (const s of byNumber.values()) seasons.push(s);
       seasons.sort((a, b) => Number(a.number) - Number(b.number));
+
+      // Indexar episodios de la actual bajo todos los contentIds de temporada conocidos
+      for (const s of seasons) {
+        seasonContentIds.set(`${s.contentId}:${currentSeason}`, contentId);
+        for (const ep of currentEps) {
+          const eid = String(ep.id || ep.contentId || '');
+          if (!eid) continue;
+          episodeContentIds.set(`${s.contentId}:${currentSeason}:${ep.number}`, eid);
+          episodeContentIds.set(`${contentId}:${currentSeason}:${ep.number}`, eid);
+          episodeParent.set(eid, contentId);
+          episodeSeasonId.set(eid, contentId);
+        }
+      }
+      limitMap(episodeContentIds, MAX_MAP);
+      limitMap(seasonContentIds, MAX_MAP);
     }
 
     item.seasons = seasons;
-    item.episodes = simple;
+    // Lista plana de episodios = SOLO la temporada abierta (no mezclar T1+T2)
+    item.episodes = isSeries
+      ? (seasons.find(s => s.current) || seasons.find(s => Number(s.number) === currentSeason) || seasons[0] || { episodes: [] }).episodes || []
+      : [];
+    if (!isSeries) {
+      // película: sin seasons
+      item.episodes = undefined;
+    }
     item.seasonSiblings = siblings;
     item.genres = item.genres || [];
 
@@ -1339,10 +1442,16 @@ async function _getMeta(id, options) {
       limitMap(itemKinds, MAX_MAP);
     }
 
-    // TMDB liviano (no bloquea si falla; se puede desactivar con tmdbEnrichMeta: false)
+    // TMDB liviano (no bloquea si falla)
     try {
       await enrichMetaLight(item);
     } catch (_) {}
+
+    // Tras TMDB: si aún no hay backdrop, no dejar vacío
+    if (!item.backdrop && item.poster) {
+      item.backdrop = item.poster;
+      item.background = item.poster;
+    }
 
     return item;
   });
