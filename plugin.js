@@ -1,4 +1,3 @@
-
 /*
  * Magis Service Catalog — estilo Kino (liviano)
  *
@@ -910,8 +909,31 @@ function imagesFromAsset(data) {
 }
 
 function parseSeasonFromName(name) {
-  const m = String(name || '').match(/(?:temporada|season|temp\.?|\bT|\bS)\s*(\d+)/i);
-  return m ? Number(m[1]) : 0;
+  const s = String(name || '');
+  // Orden: "Temporada 3", "Season 3", "Temp. 3", "T3", "T 3", "S03", al final del título
+  const patterns = [
+    /(?:temporada|season|temp\.?)\s*(\d{1,2})\b/i,
+    /(?:^|[\s_\-])T\s*(\d{1,2})(?:\b|$)/i,
+    /(?:^|[\s_\-])S\s*0*(\d{1,2})(?:\b|$)/i,
+    /\b(\d{1,2})ª\s*temporada\b/i
+  ];
+  for (const re of patterns) {
+    const m = s.match(re);
+    if (m) {
+      const n = Number(m[1]);
+      if (n >= 1 && n <= 50) return n;
+    }
+  }
+  return 0;
+}
+
+/** Número de temporada más fiable de un asset Magis (campo numérico > título). */
+function seasonNumberOf(obj, fallback = 0) {
+  if (!obj || typeof obj !== 'object') return fallback;
+  const direct = Number(obj.seasonNumber ?? obj.season ?? obj.seasonNum ?? 0);
+  if (Number.isFinite(direct) && direct >= 1 && direct <= 50) return direct;
+  const fromName = parseSeasonFromName(obj.name || obj.title || obj.viewPoint || obj.alias || '');
+  return fromName || fallback;
 }
 
 function episodeRows(data, seriesId, defaultSeason, seasonPortalId) {
@@ -1346,18 +1368,24 @@ async function _getMeta(id, options) {
       limitMap(contentImdbIds, MAX_MAP);
     }
 
-    const currentSeason = Number(data.seasonNumber || data.season || parseSeasonFromName(item.title) || defaultSeason || 1) || 1;
     const siblings = Array.isArray(data.sameSeasonSeriesList) ? data.sameSeasonSeriesList : [];
+    // Número de la temporada abierta: campo portal > título > default (nunca forzar 1 si el título dice T3)
+    const currentSeason = seasonNumberOf(data, parseSeasonFromName(item.title) || defaultSeason || 1) || 1;
 
-    // Serie completa: temporada actual + TODAS las hermanas con episodios.
-    // La UI cambia de temporada sin volver a llamar getMeta.
+    // Serie completa con números fiables. Si el portal no numera, TMDB ordena después.
     const seasons = [];
     if (isSeries) {
-      const used = new Set();
-      const byNumber = new Map();
       const seriesRootId = contentId;
+      const byNumber = new Map(); // seasonNum -> season object
+      const pending = []; // { id, number, name, known }
 
       const currentEps = simple.slice().sort((a, b) => a.number - b.number);
+      // Marcar episodios con la temporada correcta
+      for (const ep of currentEps) {
+        ep.season = currentSeason;
+        ep.seriesContentId = seriesRootId;
+        ep.seasonContentId = contentId;
+      }
       byNumber.set(currentSeason, {
         number: currentSeason,
         season: currentSeason,
@@ -1365,36 +1393,42 @@ async function _getMeta(id, options) {
         title: `Temporada ${currentSeason}`,
         episodes: currentEps,
         contentId: contentId,
-        current: true
+        current: true,
+        known: !!(data.seasonNumber || data.season || parseSeasonFromName(item.title))
       });
-      used.add(currentSeason);
       seasonContentIds.set(`${seriesRootId}:${currentSeason}`, contentId);
 
-      const links = [];
       for (const sibling of siblings) {
         const sid = String(sibling.contentId || sibling.id || '').trim();
         if (!sid || sid === contentId) continue;
-        let sn = Number(sibling.seasonNumber || sibling.season || parseSeasonFromName(sibling.name || sibling.title || '') || 0) || 0;
-        links.push({
+        const sn = seasonNumberOf(sibling, 0);
+        pending.push({
           id: sid,
           number: sn,
-          name: String(sibling.name || sibling.viewPoint || sibling.title || '')
+          name: String(sibling.name || sibling.viewPoint || sibling.title || ''),
+          known: sn > 0
         });
       }
+
+      // Asignar números solo a los que NO tienen número conocido (al final, sin pisar T1/T2/T3 reales)
+      const used = new Set(byNumber.keys());
+      for (const p of pending) if (p.known) used.add(p.number);
       let auto = 1;
-      for (const link of links) {
-        if (!link.number || used.has(link.number)) {
-          while (used.has(auto)) auto++;
-          link.number = auto;
-        }
-        used.add(link.number);
-        auto = Math.max(auto, link.number + 1);
-        if (!link.name) link.name = `Temporada ${link.number}`;
+      for (const p of pending) {
+        if (p.known) continue;
+        while (used.has(auto)) auto++;
+        p.number = auto;
+        used.add(auto);
+        auto++;
+        if (!p.name) p.name = `Temporada ${p.number}`;
+      }
+      // Los conocidos sin nombre
+      for (const p of pending) {
+        if (!p.name) p.name = `Temporada ${p.number}`;
       }
 
-      // Cargar episodios de cada temporada hermana en paralelo (máx 8)
-      const toFetch = links.slice(0, 8);
-      await Promise.all(toFetch.map(async (link) => {
+      // Cargar episodios de hermanas en paralelo (máx 8)
+      await Promise.all(pending.slice(0, 8).map(async (link) => {
         try {
           const sr = await api('v4/getItemData', {
             contentId: link.id,
@@ -1404,7 +1438,14 @@ async function _getMeta(id, options) {
             macAddr: FIXED_MAC
           });
           const sd = unwrapDetail(sr);
-          const seasonNum = link.number || Number(sd.seasonNumber || sd.season || parseSeasonFromName(link.name) || 0) || link.number;
+          // Preferir número del sibling; si el detalle trae uno claro y el link era auto, usar el del detalle
+          let seasonNum = link.number;
+          const fromDetail = seasonNumberOf(sd, 0);
+          if (fromDetail > 0 && (link.known || !byNumber.has(fromDetail))) {
+            seasonNum = fromDetail;
+            link.number = fromDetail;
+            link.known = true;
+          }
           let eps = episodeRows(sd, seriesRootId, seasonNum, link.id);
           eps = eps.map(ep => Object.assign({}, ep, {
             season: seasonNum,
@@ -1421,6 +1462,8 @@ async function _getMeta(id, options) {
             episodeParent.set(eid, String(seriesRootId));
             episodeSeasonId.set(eid, link.id);
           }
+          // No pisar la temporada actual si coincide el número
+          if (byNumber.has(seasonNum) && byNumber.get(seasonNum).current) return;
           byNumber.set(seasonNum, {
             number: seasonNum,
             season: seasonNum,
@@ -1428,7 +1471,8 @@ async function _getMeta(id, options) {
             title: link.name || `Temporada ${seasonNum}`,
             episodes: eps.sort((a, b) => a.number - b.number),
             contentId: link.id,
-            current: false
+            current: false,
+            known: link.known
           });
         } catch (_) {
           if (!byNumber.has(link.number)) {
@@ -1439,21 +1483,112 @@ async function _getMeta(id, options) {
               title: link.name || `Temporada ${link.number}`,
               episodes: [],
               contentId: link.id,
-              current: false
+              current: false,
+              known: link.known
             });
           }
         }
       }));
 
-      for (const s of byNumber.values()) seasons.push(s);
+      // Corregir orden/números con TMDB cuando hay duda (temporadas sin número conocido o desorden)
+      try {
+        const needsTmdbOrder = [...byNumber.values()].some(s => !s.known) || byNumber.size >= 2;
+        if (needsTmdbOrder && config().tmdbEnrichMeta) {
+          const tvId = await resolveTmdbId(item, true);
+          if (tvId) {
+            const tv = await tmdbGet('/tv/' + tvId, {});
+            const tmdbSeasons = (tv && Array.isArray(tv.seasons) ? tv.seasons : [])
+              .filter(s => s && Number(s.season_number) >= 1)
+              .sort((a, b) => Number(a.season_number) - Number(b.season_number));
+            if (tmdbSeasons.length) {
+              // Emparejar por cantidad de episodios (portal vs TMDB) cuando el número no era conocido
+              const portalList = [...byNumber.values()].filter(s => Array.isArray(s.episodes));
+              const usedTmdb = new Set();
+              const usedPortal = new Set();
+              const remapped = new Map();
+
+              // 1) Las que ya tenían número conocido y existe en TMDB: se quedan
+              for (const s of portalList) {
+                if (!s.known) continue;
+                const ts = tmdbSeasons.find(t => Number(t.season_number) === Number(s.number));
+                if (ts) {
+                  usedTmdb.add(Number(ts.season_number));
+                  usedPortal.add(s.contentId);
+                  remapped.set(Number(s.number), s);
+                }
+              }
+              // 2) Desconocidas: emparejar por episode_count más cercano
+              const unknown = portalList.filter(s => !usedPortal.has(s.contentId));
+              for (const s of unknown) {
+                const count = (s.episodes || []).length;
+                let best = null;
+                let bestDiff = Infinity;
+                for (const t of tmdbSeasons) {
+                  const tn = Number(t.season_number);
+                  if (usedTmdb.has(tn)) continue;
+                  const tc = Number(t.episode_count || 0);
+                  const diff = Math.abs(tc - count);
+                  // Preferir coincidencia exacta de conteo
+                  if (diff < bestDiff) {
+                    bestDiff = diff;
+                    best = t;
+                  }
+                }
+                if (best && (bestDiff <= 2 || count === 0)) {
+                  const tn = Number(best.season_number);
+                  usedTmdb.add(tn);
+                  usedPortal.add(s.contentId);
+                  const copy = Object.assign({}, s, {
+                    number: tn,
+                    season: tn,
+                    name: s.known ? s.name : `Temporada ${tn}`,
+                    title: s.known ? s.title : `Temporada ${tn}`,
+                    known: true
+                  });
+                  for (const ep of copy.episodes || []) ep.season = tn;
+                  remapped.set(tn, copy);
+                  seasonContentIds.set(`${seriesRootId}:${tn}`, s.contentId);
+                }
+              }
+              // 3) Lo que no se pudo mapear: mantener número actual
+              for (const s of portalList) {
+                if (usedPortal.has(s.contentId)) continue;
+                let n = Number(s.number);
+                while (remapped.has(n)) n += 1;
+                const copy = Object.assign({}, s, { number: n, season: n });
+                for (const ep of copy.episodes || []) ep.season = n;
+                remapped.set(n, copy);
+              }
+              if (remapped.size) {
+                byNumber.clear();
+                for (const [n, s] of remapped) byNumber.set(n, s);
+              }
+            }
+          }
+        }
+      } catch (_) { /* orden portal se mantiene */ }
+
+      for (const s of byNumber.values()) {
+        s.number = Number(s.number);
+        s.season = s.number;
+        seasons.push(s);
+      }
       seasons.sort((a, b) => Number(a.number) - Number(b.number));
 
-      for (const ep of currentEps) {
-        const eid = String(ep.id || ep.contentId || '');
-        if (!eid) continue;
-        episodeContentIds.set(`${seriesRootId}:${currentSeason}:${ep.number}`, eid);
-        episodeParent.set(eid, seriesRootId);
-        episodeSeasonId.set(eid, contentId);
+      // Reindexar mapas de reproducción con números finales
+      for (const s of seasons) {
+        const sn = Number(s.number);
+        seasonContentIds.set(`${seriesRootId}:${sn}`, s.contentId);
+        seasonContentIds.set(`${s.contentId}:${sn}`, s.contentId);
+        for (const ep of s.episodes || []) {
+          const eid = String(ep.id || ep.contentId || '');
+          if (!eid) continue;
+          ep.season = sn;
+          episodeContentIds.set(`${seriesRootId}:${sn}:${Number(ep.number)}`, eid);
+          episodeContentIds.set(`${s.contentId}:${sn}:${Number(ep.number)}`, eid);
+          episodeParent.set(eid, seriesRootId);
+          episodeSeasonId.set(eid, s.contentId);
+        }
       }
       limitMap(episodeContentIds, MAX_MAP);
       limitMap(seasonContentIds, MAX_MAP);
@@ -1462,7 +1597,7 @@ async function _getMeta(id, options) {
     }
 
     item.seasons = seasons;
-    // episodes de la temporada abierta; seasons[] tiene TODAS con sus capítulos
+    // episodes de la temporada abierta; seasons[] tiene todas ordenadas
     if (isSeries) {
       const cur = seasons.find(s => s.current) || seasons.find(s => Number(s.number) === currentSeason) || seasons[0];
       item.episodes = (cur && cur.episodes) ? cur.episodes : simple;
