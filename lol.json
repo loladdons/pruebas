@@ -1,8 +1,9 @@
+
 {
   "id": "magis-live",
   "name": "Magis Live TV",
-  "version": "1.1.0",
-  "description": "Televisión en vivo Magis por categorías. Sesión automática con seeds (sin iniciar sesión).",
+  "version": "1.2.0",
+  "description": "TV en vivo Magis (v6/getLiveData como Xuper). Categorías + canales. Seeds automáticas.",
   "author": "XuperTV",
   "entry": "plugin.js",
   "main": "plugin.js",
