@@ -1,19 +1,17 @@
 /*
- * Magis Service Catalog — estilo Kino (liviano)
+ * Magis VOD — repo para XuperTV / Nuvio
  *
- * Cambios clave vs versión pesada:
- *  - Meta: 1 sola v4/getItemData (temporada actual). Siblings = chips, sin cargar episodios.
- *  - Otras temporadas: se resuelven bajo demanda en getStreams / resolveEpisodePlayable.
- *  - TMDB: opcional, no bloquea meta. Solo stills/títulos de capítulos ya listados + logo.
- *  - IntroDB: solo en getStreams (al reproducir), nunca en meta.
- *  - Listas: siempre slimListItem (id, title, poster, type).
- *  - Home: 3 ROOT getShelveData en paralelo + hero; sin cascada getNextColumns+getHome+shelve.
- *  - Rate gap 80 ms, crypto/config cacheados, inFlight compartido, TTL largos.
- *  - ids (imdb) recordados en Map con límite; no se re-piden.
+ * - Home, Descubrir (filtros), Búsqueda, Meta completa, Streams
+ * - Sesión automática vía seeds (el usuario no inicia sesión)
+ * - Ficha de serie: TODAS las temporadas con TODOS los capítulos
+ * - TMDB opcional (logos/stills), IntroDB solo al reproducir
+ * - Rate gap 80 ms, caches, slim list items
+ *
+ * Requiere CryptoJS en el runtime (la app lo carga al detectar "CryptoJS").
  */
 'use strict';
 
-const ADDON_ID = 'magis-service-catalog';
+const ADDON_ID = 'magis-vod';
 const DEFAULTS = {
   hosts: 'sqacjy.s5lm5aydc.xyz,osuhk.m3x8o50te.com',
   scheme: 'https',
@@ -22,8 +20,11 @@ const DEFAULTS = {
   desKeyHex: 'e7af1ed7de1ffddd7bd3fe37ebdffde9ef3fe1ae39edfeb8',
   newsLimit: '12',
   tmdbApiKey: 'a2d9bbed370d9f678e34006f8750a5a5',
-  // false = no llama TMDB en meta (más rápido; la UI puede vivir sin stills)
-  tmdbEnrichMeta: true
+  tmdbEnrichMeta: true,
+  // Seeds: sesión automática (sin activar dispositivo)
+  seedsUrl: 'https://raw.githubusercontent.com/xuper-plugin/kino-plugin-xuper/seeds/seeds.json',
+  // Máx temporadas a cargar en meta (todas las hermanas)
+  maxSeasonsMeta: '30'
 };
 
 const API_VERSION = '43404';
@@ -300,14 +301,90 @@ async function portal(path, bean, baseFields = true) {
   throw new Error(`${path}: ${lastError}`);
 }
 
+
+// ─── seeds (sesión sin activar dispositivo) ──────────────────────────────────
+
+let _seedsCache = null;
+let _seedsCacheAt = 0;
+const SEEDS_TTL = 30 * 60e3;
+
+async function fetchSeeds() {
+  const now = Date.now();
+  if (_seedsCache && now - _seedsCacheAt < SEEDS_TTL) return _seedsCache;
+  const url = String(config().seedsUrl || DEFAULTS.seedsUrl || '').trim();
+  if (!url) return [];
+  try {
+    const opts = { method: 'GET', headers: { Accept: 'application/json' } };
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      opts.signal = AbortSignal.timeout(10000);
+    }
+    const res = await fetch(url, opts);
+    if (!res.ok) return _seedsCache || [];
+    const json = await res.json();
+    const list = Array.isArray(json) ? json : (json && Array.isArray(json.seeds) ? json.seeds : []);
+    _seedsCache = list.filter(s => s && s.userToken && s.sn);
+    _seedsCacheAt = now;
+    return _seedsCache;
+  } catch (_) {
+    return _seedsCache || [];
+  }
+}
+
+function pickSeed(list) {
+  if (!list || !list.length) return null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  // Preferir seeds no expiradas
+  const valid = list.filter(s => {
+    const exp = Number(s.exp || 0);
+    return !exp || exp > nowSec + 60;
+  });
+  const pool = valid.length ? valid : list;
+  return pool[Math.floor(Math.random() * pool.length)] || null;
+}
+
+async function trySessionFromSeeds() {
+  // 1) Config manual (usuario pegó token)
+  try {
+    const c = config();
+    if (c.userToken && c.sn) {
+      session = {
+        sn: String(c.sn),
+        userId: String(c.userId || ''),
+        userToken: String(c.userToken),
+        jwtToken: String(c.jwtToken || '')
+      };
+      return true;
+    }
+  } catch (_) {}
+
+  // 2) Seeds remotas
+  const seeds = await fetchSeeds();
+  const seed = pickSeed(seeds);
+  if (!seed) return false;
+  session = {
+    sn: String(seed.sn || ''),
+    userId: String(seed.userId || ''),
+    userToken: String(seed.userToken || ''),
+    jwtToken: String(seed.jwtToken || '')
+  };
+  return !!(session.userToken && session.sn);
+}
+
+
 async function ensureSession() {
   if (session && session.userToken) return;
   if (sessionPromise) return sessionPromise;
 
   sessionPromise = (async () => {
     if (typeof CryptoJS === 'undefined') {
-      throw new Error('El runtime no ha cargado CryptoJS; revisa que index.js incluya la palabra CryptoJS.');
+      throw new Error('El runtime no ha cargado CryptoJS; revisa que el addon mencione CryptoJS.');
     }
+
+    // Preferir seeds / config (usuario no genera sesión)
+    const fromSeed = await trySessionFromSeeds();
+    if (fromSeed && session && session.userToken) return;
+
+    // Fallback: activación clásica
     const tokenResponse = await portal('v3/snToken', hardwareFingerprint(), false);
     const snToken = String(tokenResponse.snToken || '');
     if (!snToken) throw new Error('El servicio no devolvió snToken');
@@ -1428,7 +1505,8 @@ async function _getMeta(id, options) {
       }
 
       // Cargar episodios de hermanas en paralelo (máx 8)
-      await Promise.all(pending.slice(0, 8).map(async (link) => {
+      const maxSeasons = Math.min(40, Math.max(1, parseInt(config().maxSeasonsMeta, 10) || 30));
+      await Promise.all(pending.slice(0, maxSeasons).map(async (link) => {
         try {
           const sr = await api('v4/getItemData', {
             contentId: link.id,
