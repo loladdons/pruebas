@@ -1,49 +1,53 @@
 {
-  "id": "pruebs magis",
-  "name": "XuperTvpruebs",
-  "version": "0.2.0",
+  "id": "magis-vod",
+  "name": "Magis VOD",
+  "version": "1.2.0",
+  "description": "Catálogo Magis de películas, series y animación. Home, descubrir con filtros, búsqueda y ficha completa con todas las temporadas y capítulos.",
+  "author": "XuperTV",
   "entry": "plugin.js",
-  "icon": "icon.png",
-  "author": "JostinSantos",
-  "description": "Películas, series, anime  en español latino de sololatino.net: géneros, plataformas, búsqueda y varios servidores por título.",
-  "color": "#06B6D4",
+  "main": "plugin.js",
+  "icon": "https://i.imgur.com/8Km9tLL.png",
+  "categories": ["movies", "series", "anime"],
+  "capabilities": ["home", "discover", "search", "meta", "streams", "catalog"],
+  "languages": ["Latino", "Español"],
+  "types": ["movie", "series", "anime"],
+  "apiVersion": 6,
+  "newsImageStyle": "backdrop",
+  "discoverImageStyle": "poster",
+  "searchImageStyle": "poster",
+  "discoverShowTitle": true,
+  "searchShowTitle": true,
+  "episodesPagination": false,
   "theme": {
-    "accent": "#06B6D4",
-    "onAccent": "#001418",
-    "background": "#070E18",
-    "surface": "#0F1B2B",
-    "highlight": "#67E8F9"
-  },
-  "section": {
-    "label": "XuperTv"
-  },
-  "categories": [
-    "movies",
-    "series"
-  ],
-  "capabilities": [
-    "home",
-    "discover",
-    "search",
-    "meta",
-    "streams"
-  ],
-  "languages": [
-    "Latino",
-    "Castellano",
-    "Subtitulado"
-  ],
-  "episodesPagination": {
-    "enabled": true,
-    "perPage": 50
+    "accent": "#E50914",
+    "background": "#0B0B0F",
+    "surface": "#16161D"
   },
   "config": [
-    
     {
-      "key": "newsLimit",
-      "label": "Máximo de novedades",
-      "type": "number",
-      "default": "12"
+      "key": "hosts",
+      "label": "Hosts Magis (separados por coma)",
+      "type": "text",
+      "default": "sqacjy.s5lm5aydc.xyz,osuhk.m3x8o50te.com"
+    },
+    {
+      "key": "seedsUrl",
+      "label": "URL de seeds (sesión automática)",
+      "type": "text",
+      "default": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-xuper/seeds/seeds.json"
+    },
+    {
+      "key": "tmdbEnrichMeta",
+      "label": "Enriquecer ficha con TMDB (logos/stills)",
+      "type": "select",
+      "default": "true",
+      "options": ["true", "false"]
+    },
+    {
+      "key": "tmdbApiKey",
+      "label": "TMDB API Key (opcional)",
+      "type": "text",
+      "default": "a2d9bbed370d9f678e34006f8750a5a5"
     }
   ]
 }
