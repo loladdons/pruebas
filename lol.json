@@ -1,25 +1,20 @@
 {
-  "id": "magis-vod",
-  "name": "Magis VOD",
-  "version": "1.2.0",
-  "description": "Catálogo Magis de películas, series y animación. Home, descubrir con filtros, búsqueda y ficha completa con todas las temporadas y capítulos.",
+  "id": "magis-live",
+  "name": "Magis Live TV",
+  "version": "1.1.0",
+  "description": "Televisión en vivo Magis por categorías. Sesión automática con seeds (sin iniciar sesión).",
   "author": "XuperTV",
   "entry": "plugin.js",
   "main": "plugin.js",
   "icon": "https://i.imgur.com/8Km9tLL.png",
-  "categories": ["movies", "series", "anime"],
-  "capabilities": ["home", "discover", "search", "meta", "streams", "catalog"],
-  "languages": ["Latino", "Español"],
-  "types": ["movie", "series", "anime"],
+  "categories": ["live", "tv", "iptv"],
+  "capabilities": ["live", "home", "streams"],
+  "languages": ["Español"],
+  "types": ["channel", "live"],
   "apiVersion": 6,
-  "newsImageStyle": "backdrop",
-  "discoverImageStyle": "poster",
-  "searchImageStyle": "poster",
-  "discoverShowTitle": true,
-  "searchShowTitle": true,
-  "episodesPagination": false,
+  "tabs": ["live", "settings"],
   "theme": {
-    "accent": "#E50914",
+    "accent": "#1E88E5",
     "background": "#0B0B0F",
     "surface": "#16161D"
   },
@@ -37,17 +32,10 @@
       "default": "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-xuper/seeds/seeds.json"
     },
     {
-      "key": "tmdbEnrichMeta",
-      "label": "Enriquecer ficha con TMDB (logos/stills)",
-      "type": "select",
-      "default": "true",
-      "options": ["true", "false"]
-    },
-    {
-      "key": "tmdbApiKey",
-      "label": "TMDB API Key (opcional)",
+      "key": "liveRoot",
+      "label": "Código columna live",
       "type": "text",
-      "default": "a2d9bbed370d9f678e34006f8750a5a5"
+      "default": "masnew_live"
     }
   ]
 }
