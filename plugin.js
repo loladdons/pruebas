@@ -3,13 +3,12 @@
  * Fuente: https://serieskao.top
  * Compatible con loadAddonCode (CommonJS module.exports) + callMethod.
  *
- * Fixes 1.1.0:
- *  - Episodios/temporadas: parser real del HTML (data-season / data-episode)
- *  - Streams: primero extrae /vidurl/... de la ficha, luego Embed69 (PoW+AES)
- *    o Xupalace, y por último extractores HLS (StreamWish / VidHide / VOE)
- *  - Discover: tipos = Todo / Películas / Series / Animes (sin dorama como tipo)
- *  - Géneros: lista completa + dorama como género/catálogo
- *  - Home por secciones estilo Cuevana
+ * Fixes 1.1.1:
+ *  - Embed69: ya no usa PoW. Clave AES = SHA256(LINK_CHALLENGE + LINK_SALT)
+ *  - Streams desde https://serieskao.top/vidurl/{imdb}/
+ *  - Discover: tipos = Todo / Películas / Series / Animes / Doramas
+ *  - Género solo como filtro de películas (como el Dart)
+ *  - Episodios/temporadas con data-season / data-episode
  */
 var SITE = "https://serieskao.top";
 var UA =
@@ -18,6 +17,7 @@ var PAGE_SIZE = 24;
 var TMDB_KEY = "a2d9bbed370d9f678e34006f8750a5a5";
 var OMDB_KEY = "5b0e8a3e";
 
+// Géneros de películas (como en el scraper Dart). Dorama es TIPO, no género.
 var GENRES = [
   ["accion", "Acción"],
   ["animacion", "Animación"],
@@ -36,8 +36,7 @@ var GENRES = [
   ["suspense", "Suspense"],
   ["terror", "Terror"],
   ["western", "Western"],
-  ["misterio", "Misterio"],
-  ["dorama", "Dorama"]
+  ["misterio", "Misterio"]
 ];
 
 var MIRRORS = [
@@ -305,6 +304,8 @@ async function getAds() {
 /* ========== DISCOVER / CATALOGS / SEARCH ========== */
 
 async function getDiscoverFilters() {
+  // Tipo: movie | tv | anime | dorama (como tiposDisponibles del Dart)
+  // Género: solo aplica a películas (segundo filtro)
   return [
     {
       id: "type",
@@ -313,12 +314,13 @@ async function getDiscoverFilters() {
         { id: "all", label: "Todo" },
         { id: "movie", label: "Películas" },
         { id: "series", label: "Series" },
-        { id: "anime", label: "Animes" }
+        { id: "anime", label: "Animes" },
+        { id: "dorama", label: "Doramas" }
       ]
     },
     {
       id: "genre",
-      label: "Género",
+      label: "Género (películas)",
       options: [{ id: "all", label: "Todos" }].concat(
         GENRES.map(function (g) {
           return { id: g[0], label: g[1] };
@@ -334,13 +336,22 @@ async function getDiscover(opts) {
   var type = String(opts.type || opts.filter || "all").toLowerCase();
   var genre = String(opts.genre || "all").toLowerCase();
 
+  // Misma lógica que SeriesKaoScraper.fetch del Dart:
+  // - genero → /generos/{genero} (solo tiene sentido con películas)
+  // - dorama → /generos/dorama
+  // - movie/series/anime → rutas propias
   var path = "/peliculas";
-  // Género tiene prioridad (incluye dorama)
-  if (genre && genre !== "all" && genre !== "movie" && genre !== "series" && genre !== "anime") {
+  if (type === "dorama" || type === "doramas") {
+    path = "/generos/dorama";
+  } else if (
+    genre &&
+    genre !== "all" &&
+    (type === "movie" || type === "peliculas" || type === "all" || !type)
+  ) {
     path = "/generos/" + genre;
-  } else if (type === "series") {
+  } else if (type === "series" || type === "tv" || type === "serie") {
     path = "/series";
-  } else if (type === "anime") {
+  } else if (type === "anime" || type === "animes") {
     path = "/animes";
   } else if (type === "movie" || type === "peliculas") {
     path = "/peliculas";
@@ -349,9 +360,21 @@ async function getDiscover(opts) {
   try {
     var res = await listCards(path, page);
     var items = res.cards.map(cardToItem);
-    if (type === "movie") items = items.filter(function (it) { return it.type === "movie"; });
-    if (type === "series") items = items.filter(function (it) { return it.type === "series"; });
-    if (type === "anime") items = items.filter(function (it) { return it.type === "anime"; });
+    if (type === "movie" || type === "peliculas") {
+      items = items.filter(function (it) {
+        return it.type === "movie";
+      });
+    }
+    if (type === "series" || type === "tv") {
+      items = items.filter(function (it) {
+        return it.type === "series";
+      });
+    }
+    if (type === "anime") {
+      items = items.filter(function (it) {
+        return it.type === "anime";
+      });
+    }
     return {
       page: page,
       hasMore: res.pagination.hasNext || res.cards.length >= PAGE_SIZE,
@@ -746,21 +769,6 @@ async function decryptAES(encryptedBase64, aesKeyBytes) {
   }
 }
 
-function solvePow(challenge, difficulty) {
-  var prefix = "0".repeat(difficulty || 3);
-  for (var nonce = 0; nonce < 2000000; nonce++) {
-    var hash = sha256Hex(challenge + nonce);
-    if (hash.indexOf(prefix) === 0) return nonce;
-  }
-  return null;
-}
-
-function generateAesKey(challenge, nonce, salt) {
-  // Igual que PHP: hash('sha256', challenge+nonce+salt, true) → 32 bytes
-  var hex = sha256Hex(challenge + nonce + (salt || ""));
-  return hexToBytes(hex);
-}
-
 function extractDataLink(html) {
   var patterns = [
     /let\s+dataLink\s*=\s*(\[[\s\S]*?\]);/,
@@ -770,22 +778,32 @@ function extractDataLink(html) {
     var m = patterns[i].exec(html);
     if (m) {
       try {
-        return JSON.parse(m[1].replace(/\\"/g, '"'));
-      } catch (_) {}
+        // En el HTML del script, \/ es escape JS → /
+        var jsonStr = m[1].replace(/\\"/g, '"').replace(/\\\//g, "/");
+        return JSON.parse(jsonStr);
+      } catch (_) {
+        try {
+          return JSON.parse(m[1].replace(/\\"/g, '"'));
+        } catch (_2) {}
+      }
     }
   }
   return null;
 }
 
-function extractPowConstants(html) {
-  var c = {};
-  var ch = /POW_CHALLENGE\s*=\s*['"]?([a-f0-9]+)['"]?/.exec(html);
-  if (ch) c.challenge = ch[1];
-  var sa = /POW_SALT\s*=\s*['"]?([a-f0-9]+)['"]?/.exec(html);
-  if (sa) c.salt = sa[1];
-  var di = /POW_DIFFICULTY\s*=\s*(\d+)/.exec(html);
-  if (di) c.difficulty = parseInt(di[1], 10) || 3;
-  return c;
+/** Nuevo esquema Embed69 (2026): sin PoW.
+ *  AES key = SHA-256(LINK_CHALLENGE + LINK_SALT) en bytes.
+ */
+function extractLinkKeyMaterial(html) {
+  var ch = /LINK_CHALLENGE\s*=\s*['"]([a-f0-9]+)['"]/.exec(html);
+  var sa = /LINK_SALT\s*=\s*['"]([a-f0-9]+)['"]/.exec(html);
+  if (!ch || !sa) return null;
+  return { challenge: ch[1], salt: sa[1] };
+}
+
+function generateLinkAesKey(challenge, salt) {
+  var hex = sha256Hex(String(challenge) + String(salt || ""));
+  return hexToBytes(hex);
 }
 
 function normalizeLang(idioma) {
@@ -847,16 +865,14 @@ async function fetchFromSeriesKao(idCompleto) {
   var dataLink = extractDataLink(html);
   if (!dataLink || !dataLink.length) return [];
 
-  var pow = extractPowConstants(html);
-  if (!pow.challenge) return [];
+  // Clave AES = SHA256(LINK_CHALLENGE + LINK_SALT)  (ya no hay PoW)
+  var mat = extractLinkKeyMaterial(html);
+  if (!mat || !mat.challenge) return [];
+  var aesKey = generateLinkAesKey(mat.challenge, mat.salt);
 
-  var nonce = solvePow(pow.challenge, pow.difficulty || 3);
-  if (nonce == null) return [];
-
-  var aesKey = generateAesKey(pow.challenge, nonce, pow.salt || "");
   var results = [];
-  var filtrados = ["voe", "rapidvideo"];
-
+  // No filtramos voe aquí: luego resolveFinal intenta extraer HLS;
+  // si falla, se entrega el embed igual.
   for (var i = 0; i < dataLink.length; i++) {
     var item = dataLink[i];
     var idioma = normalizeLang(item.video_language || "DESCONOCIDO");
@@ -864,15 +880,18 @@ async function fetchFromSeriesKao(idCompleto) {
     for (var j = 0; j < embeds.length; j++) {
       var emb = embeds[j];
       var servidor = String(emb.servername || "").toLowerCase();
-      if (filtrados.indexOf(servidor) >= 0) continue;
       var enlaceCifrado = emb.link || "";
       if (!enlaceCifrado) continue;
+      // En el HTML a veces viene con \/ → normalizar a base64 válido
+      enlaceCifrado = String(enlaceCifrado).replace(/\\\//g, "/");
       var urlReal = await decryptAES(enlaceCifrado, aesKey);
       if (!urlReal) continue;
       urlReal = urlReal
         .replace(/`/g, "")
+        .trim()
         .replace(/hglink\.to/g, "vibuxer.com")
         .replace(/filelions\.to/g, "callistanise.com");
+      if (urlReal.indexOf("http") !== 0) continue;
       results.push({
         serverName: servidor || "desconocido",
         url: urlReal,
