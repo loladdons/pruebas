@@ -1,7 +1,7 @@
 {
   "id": "pruebas",
   "name": "pruebas",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Películas y series en Español Latino, Castellano e Inglés desde Cuevana. v1.0.1 — fix exports CommonJS para que la app cargue getHome/getStreams/etc.",
   "author": "xuper-plugin (port)",
   "repo": "cuevana-pro",
