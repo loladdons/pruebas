@@ -1,25 +1,77 @@
-
 {
-  "id": "magis-live",
-  "name": "Magis Live TV",
-  "version": "1.3.0",
-  "description": "TV en vivo Magis (v6/getLiveData como Xuper). Categorías + canales. Seeds automáticas.",
-  "author": "XuperTV",
+  "id": "pruebas",
+  "name": "pruebas",
+  "version": "2.0.0",
+  "description": "Películas y series en Español Latino, Castellano e Inglés desde Cuevana. v1.0.1 — fix exports CommonJS para que la app cargue getHome/getStreams/etc.",
+  "author": "xuper-plugin (port)",
+  "repo": "cuevana-pro",
   "entry": "plugin.js",
-  "main": "plugin.js",
-  "icon": "https://i.imgur.com/8Km9tLL.png",
-  "categories": ["live", "tv", "iptv"],
-  "capabilities": ["live", "home", "streams"],
-  "languages": ["Español"],
-  "types": ["channel", "live"],
+  "icon": "icon.png",
   "apiVersion": 6,
-  "tabs": ["live", "settings"],
+  "browser": true,
+  "section": {
+    "label": "Cuevana Pro"
+  },
+  "languages": [
+    "Latino",
+    "Castellano",
+    "Inglés"
+  ],
+  "capabilities": [
+    "home",
+    "discover",
+    "search",
+    "meta",
+    "streams"
+  ],
+  "tabs": [
+    "home",
+    "discover",
+    "search",
+    "library",
+    "settings"
+  ],
+  "newsImageStyle": "banner",
+  "episodesPagination": {
+    "enabled": true,
+    "perPage": 25
+  },
   "theme": {
-    "accent": "#1E88E5",
-    "background": "#0B0B0F",
-    "surface": "#16161D"
+    "accent": "#3B82F6",
+    "onAccent": "#FFFFFF",
+    "background": "#08101F",
+    "surface": "#111C33",
+    "highlight": "#93C5FD"
   },
   "config": [
-    
+    {
+      "key": "pref_lang",
+      "label": "Idioma preferido",
+      "type": "select",
+      "default": "latino",
+      "description": "Se prioriza este idioma al listar servidores. Si falla, se ofrecen los demás.",
+      "options": [
+        {
+          "id": "latino",
+          "label": "Latino"
+        },
+        {
+          "id": "spanish",
+          "label": "Castellano"
+        },
+        {
+          "id": "english",
+          "label": "Inglés"
+        }
+      ]
+    }
+  ],
+  "notices": [
+    {
+      "id": "v1-first",
+      "title": "¡Primera versión de Cuevana Pro!",
+      "message": "Este repositorio es la versión 1.0.0 (port inicial). Incluye catálogo, búsqueda, detalles, episodios y servidores. Se esperan mejoras en extractores de video, estabilidad de mirrors y más opciones. ¡Gracias por probar!",
+      "buttonText": "Entendido"
+    }
   ]
 }
