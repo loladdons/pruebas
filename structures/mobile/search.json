@@ -1,0 +1,44 @@
+{
+  "id": "search",
+  "title": "Buscar",
+  "root": {
+    "id": "search_root",
+    "type": "column",
+    "style": { "backgroundColor": "#0F0F0F" },
+    "children": [
+      {
+        "id": "search_header",
+        "type": "container",
+        "style": { "backgroundColor": "#0F0F0F", "padding": { "x": 12, "y": 8 } },
+        "children": [
+          {
+            "type": "searchBar",
+            "title": "Buscar en YouTube",
+            "props": {
+              "placeholder": "Buscar vídeos, canales, listas..."
+            }
+          }
+        ]
+      },
+      {
+        "id": "search_filters",
+        "type": "chips",
+        "props": {
+          "options": ["Vídeos", "Canales", "Listas", "En directo", "Cortos"]
+        }
+      },
+      {
+        "id": "search_results",
+        "type": "list",
+        "source": "search.results",
+        "props": { "showTitle": true },
+        "children": []
+      },
+      {
+        "id": "search_empty",
+        "type": "emptyState",
+        "title": "Escribe algo para buscar en YouTube"
+      }
+    ]
+  }
+}

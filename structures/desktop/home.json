@@ -1,0 +1,70 @@
+{
+  "id": "home",
+  "title": "YouTube",
+  "home": true,
+  "root": {
+    "type": "scroll",
+    "style": { "backgroundColor": "#0F0F0F" },
+    "children": [
+      {
+        "type": "container",
+        "style": { "padding": { "x": 24, "y": 12 }, "backgroundColor": "#0F0F0F" },
+        "children": [
+          {
+            "type": "row",
+            "props": { "mainAxisAlignment": "spaceBetween", "crossAxisAlignment": "center" },
+            "children": [
+              {
+                "type": "row",
+                "children": [
+                  { "type": "icon", "props": { "name": "play", "size": 32 }, "style": { "color": "#FF0000" } },
+                  { "type": "spacer", "props": { "width": 10 } },
+                  { "type": "text", "title": "YouTube Demo", "style": { "fontSize": 22, "fontWeight": "bold", "color": "#FFFFFF" } }
+                ]
+              },
+              {
+                "type": "searchBar",
+                "props": { "placeholder": "Buscar" }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "chips",
+        "props": {
+          "options": ["Todo", "Música", "En directo", "Videojuegos", "Noticias", "Podcasts", "Cocina", "Deportes", "Ciencia"]
+        }
+      },
+      {
+        "type": "hero",
+        "props": { "height": 320 },
+        "source": "getHome.rows.0.items"
+      },
+      {
+        "type": "section",
+        "title": "Tendencias",
+        "source": "getHome.rows.0.items",
+        "props": { "height": 220, "itemWidth": 240, "showTitle": true }
+      },
+      {
+        "type": "section",
+        "title": "Música",
+        "source": "getHome.rows.1.items",
+        "props": { "height": 220, "itemWidth": 240, "showTitle": true }
+      },
+      {
+        "type": "section",
+        "title": "Documentales",
+        "source": "getHome.rows.2.items",
+        "props": { "height": 220, "itemWidth": 240, "showTitle": true }
+      },
+      {
+        "type": "section",
+        "title": "Películas y cortos",
+        "source": "getHome.rows.3.items",
+        "props": { "height": 220, "itemWidth": 240, "showTitle": true }
+      }
+    ]
+  }
+}

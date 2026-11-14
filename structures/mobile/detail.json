@@ -1,0 +1,140 @@
+{
+  "id": "detail",
+  "title": "Contenido",
+  "root": {
+    "id": "detail_root",
+    "type": "scroll",
+    "style": { "backgroundColor": "#0F0F0F" },
+    "children": [
+      {
+        "id": "player_area",
+        "type": "container",
+        "style": { "backgroundColor": "#000000" },
+        "props": { "height": 220 },
+        "children": [
+          {
+            "id": "player",
+            "type": "playerEmbed",
+            "native": "player",
+            "props": { "height": 220 }
+          }
+        ]
+      },
+      {
+        "id": "info_block",
+        "type": "container",
+        "style": { "padding": { "x": 14, "y": 12 }, "backgroundColor": "#0F0F0F" },
+        "children": [
+          {
+            "type": "text",
+            "title": "{{title}}",
+            "id": "video_title",
+            "style": { "fontSize": 16, "fontWeight": "bold", "color": "#FFFFFF" },
+            "props": { "maxLines": 3 }
+          },
+          { "type": "spacer", "props": { "height": 8 } },
+          {
+            "type": "row",
+            "props": { "mainAxisAlignment": "start" },
+            "children": [
+              { "type": "text", "title": "{{viewsText}} visualizaciones", "style": { "fontSize": 12, "color": "#AAAAAA" } },
+              { "type": "spacer", "props": { "width": 12 } },
+              { "type": "text", "title": "{{publishedText}}", "style": { "fontSize": 12, "color": "#AAAAAA" } }
+            ]
+          },
+          { "type": "spacer", "props": { "height": 12 } },
+          {
+            "type": "row",
+            "props": { "mainAxisAlignment": "spaceAround" },
+            "children": [
+              {
+                "type": "column",
+                "props": { "crossAxisAlignment": "center" },
+                "children": [
+                  { "type": "icon", "props": { "name": "star", "size": 22 }, "style": { "color": "#FFFFFF" } },
+                  { "type": "text", "title": "Me gusta", "style": { "fontSize": 11, "color": "#CCCCCC" } }
+                ]
+              },
+              {
+                "type": "column",
+                "props": { "crossAxisAlignment": "center" },
+                "children": [
+                  { "type": "icon", "props": { "name": "share", "size": 22 }, "style": { "color": "#FFFFFF" } },
+                  { "type": "text", "title": "Compartir", "style": { "fontSize": 11, "color": "#CCCCCC" } }
+                ]
+              },
+              {
+                "type": "column",
+                "props": { "crossAxisAlignment": "center" },
+                "children": [
+                  { "type": "icon", "props": { "name": "bookmark", "size": 22 }, "style": { "color": "#FFFFFF" } },
+                  { "type": "text", "title": "Guardar", "style": { "fontSize": 11, "color": "#CCCCCC" } }
+                ]
+              },
+              {
+                "type": "column",
+                "props": { "crossAxisAlignment": "center" },
+                "children": [
+                  { "type": "icon", "props": { "name": "download", "size": 22 }, "style": { "color": "#FFFFFF" } },
+                  { "type": "text", "title": "Descargar", "style": { "fontSize": 11, "color": "#CCCCCC" } }
+                ]
+              }
+            ]
+          },
+          { "type": "spacer", "props": { "height": 14 } },
+          { "type": "divider" },
+          { "type": "spacer", "props": { "height": 12 } },
+          {
+            "type": "row",
+            "props": { "crossAxisAlignment": "center" },
+            "children": [
+              { "type": "avatar", "props": { "size": 40 } },
+              { "type": "spacer", "props": { "width": 12 } },
+              {
+                "type": "column",
+                "children": [
+                  { "type": "text", "title": "{{channel}}", "style": { "fontSize": 14, "fontWeight": "w600", "color": "#FFFFFF" } },
+                  { "type": "text", "title": "Canal de YouTube", "style": { "fontSize": 12, "color": "#AAAAAA" } }
+                ]
+              },
+              { "type": "spacer", "props": { "width": 12 } },
+              {
+                "type": "button",
+                "title": "Suscribirse",
+                "props": { "action": "subscribe" },
+                "style": { "backgroundColor": "#FF0000", "color": "#FFFFFF", "borderRadius": 18 }
+              }
+            ]
+          },
+          { "type": "spacer", "props": { "height": 14 } },
+          {
+            "type": "container",
+            "style": { "backgroundColor": "#212121", "borderRadius": 12, "padding": { "x": 12, "y": 10 } },
+            "children": [
+              {
+                "type": "text",
+                "title": "{{overview}}",
+                "style": { "fontSize": 13, "color": "#DDDDDD" },
+                "props": { "maxLines": 8 }
+              }
+            ]
+          },
+          { "type": "spacer", "props": { "height": 18 } },
+          {
+            "type": "text",
+            "title": "Relacionados",
+            "style": { "fontSize": 16, "fontWeight": "bold", "color": "#FFFFFF" }
+          },
+          { "type": "spacer", "props": { "height": 8 } },
+          {
+            "id": "related",
+            "type": "list",
+            "source": "related.items",
+            "props": { "showTitle": true }
+          },
+          { "type": "spacer", "props": { "height": 40 } }
+        ]
+      }
+    ]
+  }
+}

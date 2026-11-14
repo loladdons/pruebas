@@ -1,0 +1,15 @@
+{
+  "id": "player",
+  "title": "Reproductor",
+  "root": {
+    "type": "stack",
+    "style": { "backgroundColor": "#000000" },
+    "children": [
+      {
+        "type": "native",
+        "native": "player",
+        "props": { "fullscreen": true, "controls": true }
+      }
+    ]
+  }
+}
