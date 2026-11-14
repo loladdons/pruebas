@@ -5,31 +5,86 @@
   "root": {
     "id": "home_root",
     "type": "scroll",
-    "style": { "backgroundColor": "#0F0F0F" },
+    "style": {
+      "backgroundColor": "#0F0F0F"
+    },
     "children": [
       {
         "id": "top_bar",
         "type": "container",
-        "style": { "backgroundColor": "#0F0F0F", "padding": { "x": 12, "y": 10 } },
+        "style": {
+          "backgroundColor": "#0F0F0F",
+          "padding": {
+            "l": 12,
+            "r": 12,
+            "t": 8,
+            "b": 8
+          }
+        },
         "children": [
           {
             "type": "row",
-            "props": { "mainAxisAlignment": "spaceBetween", "crossAxisAlignment": "center" },
+            "props": {
+              "mainAxisAlignment": "spaceBetween",
+              "crossAxisAlignment": "center"
+            },
             "children": [
               {
                 "type": "row",
                 "children": [
-                  { "type": "icon", "props": { "name": "play", "size": 28 }, "style": { "color": "#FF0000" } },
-                  { "type": "spacer", "props": { "width": 8 } },
-                  { "type": "text", "title": "YouTube Demo", "style": { "fontSize": 20, "fontWeight": "bold", "color": "#FFFFFF" } }
+                  {
+                    "type": "icon",
+                    "props": {
+                      "name": "play",
+                      "size": 28
+                    },
+                    "style": {
+                      "color": "#FF0000"
+                    }
+                  },
+                  {
+                    "type": "spacer",
+                    "props": {
+                      "width": 8
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "title": "YouTube Demo",
+                    "style": {
+                      "fontSize": 20,
+                      "fontWeight": "bold",
+                      "color": "#FFFFFF"
+                    }
+                  }
                 ]
               },
               {
                 "type": "row",
                 "children": [
-                  { "type": "icon", "props": { "name": "search", "size": 24 }, "style": { "color": "#FFFFFF" } },
-                  { "type": "spacer", "props": { "width": 16 } },
-                  { "type": "avatar", "props": { "size": 32, "url": "https://www.youtube.com/s/desktop/yt_1200.png" } }
+                  {
+                    "type": "icon",
+                    "props": {
+                      "name": "search",
+                      "size": 24
+                    },
+                    "style": {
+                      "color": "#FFFFFF"
+                    }
+                  },
+                  {
+                    "type": "spacer",
+                    "props": {
+                      "width": 16
+                    }
+                  },
+                  {
+                    "type": "avatar",
+                    "props": {
+                      "size": 32,
+                      "url": "https://www.youtube.com/s/desktop/yt_1200.png"
+                    }
+                  }
                 ]
               }
             ]
@@ -40,48 +95,79 @@
         "id": "chips_row",
         "type": "chips",
         "props": {
-          "options": ["Todo", "Música", "En directo", "Videojuegos", "Noticias", "Podcasts", "Cocina", "Deportes"]
+          "options": [
+            "Todo",
+            "Música",
+            "En directo",
+            "Videojuegos",
+            "Noticias",
+            "Podcasts",
+            "Cocina",
+            "Deportes"
+          ]
         }
       },
       {
         "id": "hero",
         "type": "hero",
-        "props": { "height": 210 },
+        "props": {
+          "height": 210
+        },
         "source": "getHome.rows.0.items",
-        "style": { "borderRadius": 0 }
+        "style": {
+          "borderRadius": 0
+        }
       },
       {
         "id": "row_trending",
         "type": "section",
         "title": "Tendencias",
         "source": "getHome.rows.0.items",
-        "props": { "height": 200, "itemWidth": 160, "showTitle": true }
+        "props": {
+          "height": 200,
+          "itemWidth": 160,
+          "showTitle": true
+        }
       },
       {
         "id": "row_music",
         "type": "section",
         "title": "Música y conciertos",
         "source": "getHome.rows.1.items",
-        "props": { "height": 200, "itemWidth": 160, "showTitle": true }
+        "props": {
+          "height": 200,
+          "itemWidth": 160,
+          "showTitle": true
+        }
       },
       {
         "id": "row_docs",
         "type": "section",
         "title": "Documentales",
         "source": "getHome.rows.2.items",
-        "props": { "height": 200, "itemWidth": 160, "showTitle": true }
+        "props": {
+          "height": 200,
+          "itemWidth": 160,
+          "showTitle": true
+        }
       },
       {
         "id": "row_movies",
         "type": "section",
         "title": "Películas y cortos",
         "source": "getHome.rows.3.items",
-        "props": { "height": 200, "itemWidth": 160, "showTitle": true }
+        "props": {
+          "height": 200,
+          "itemWidth": 160,
+          "showTitle": true
+        }
       },
       {
         "id": "spacer_bottom",
         "type": "spacer",
-        "props": { "height": 90 }
+        "props": {
+          "height": 90
+        }
       }
     ]
   }
