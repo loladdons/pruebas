@@ -1,7 +1,7 @@
 {
   "id": "youtube-demo-structures",
   "name": "YouTube Demo",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Demo completo con UI custom (structures). Home, búsqueda, ficha y player definidos en el repo para mobile, TV y desktop. Lógica YouTube con Data API + Innertube + Invidious/Piped.",
   "author": "Nuvio Demo",
   "entry": "plugin.js",
