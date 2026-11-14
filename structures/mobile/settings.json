@@ -3,25 +3,72 @@
   "title": "Ajustes",
   "root": {
     "type": "scroll",
-    "style": { "backgroundColor": "#0F0F0F" },
+    "style": {
+      "backgroundColor": "#0F0F0F"
+    },
     "children": [
       {
         "type": "container",
-        "style": { "padding": { "x": 16, "y": 16 } },
+        "style": {
+          "padding": {
+            "l": 16,
+            "r": 16,
+            "t": 12,
+            "b": 8
+          }
+        },
         "children": [
-          { "type": "text", "title": "Ajustes del repo", "style": { "fontSize": 20, "fontWeight": "bold", "color": "#FFFFFF" } },
-          { "type": "spacer", "props": { "height": 12 } },
+          {
+            "type": "text",
+            "title": "Ajustes",
+            "style": {
+              "fontSize": 22,
+              "fontWeight": "bold",
+              "color": "#FFFFFF"
+            }
+          },
+          {
+            "type": "spacer",
+            "props": {
+              "height": 8
+            }
+          },
+          {
+            "type": "text",
+            "title": "Configuracion del repo YouTube Demo (API key, region, idioma).",
+            "style": {
+              "fontSize": 13,
+              "color": "#888888"
+            }
+          },
+          {
+            "type": "spacer",
+            "props": {
+              "height": 12
+            }
+          },
           {
             "type": "native",
             "native": "config",
             "props": {}
           },
-          { "type": "spacer", "props": { "height": 20 } },
+          {
+            "type": "spacer",
+            "props": {
+              "height": 20
+            }
+          },
           {
             "type": "article",
             "title": "Sobre este demo",
             "props": {
-              "body": "Repo de ejemplo con UI 100% definida en structures/ (mobile, tv, desktop). La lógica de datos es el plugin de YouTube (Data API, Innertube, Invidious, Piped)."
+              "body": "UI 100% en structures/mobile. Ficha con player integrado estilo YouTube. Historial y favoritos con LibraryService. Datos desde plugin.js."
+            }
+          },
+          {
+            "type": "spacer",
+            "props": {
+              "height": 96
             }
           }
         ]

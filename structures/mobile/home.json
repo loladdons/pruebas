@@ -10,15 +10,15 @@
     },
     "children": [
       {
-        "id": "top_bar",
+        "id": "appbar",
         "type": "container",
         "style": {
           "backgroundColor": "#0F0F0F",
           "padding": {
-            "l": 12,
+            "l": 8,
             "r": 12,
-            "t": 8,
-            "b": 8
+            "t": 6,
+            "b": 6
           }
         },
         "children": [
@@ -31,6 +31,9 @@
             "children": [
               {
                 "type": "row",
+                "props": {
+                  "crossAxisAlignment": "center"
+                },
                 "children": [
                   {
                     "type": "icon",
@@ -52,7 +55,7 @@
                     "type": "text",
                     "title": "YouTube Demo",
                     "style": {
-                      "fontSize": 20,
+                      "fontSize": 18,
                       "fontWeight": "bold",
                       "color": "#FFFFFF"
                     }
@@ -75,13 +78,13 @@
                   {
                     "type": "spacer",
                     "props": {
-                      "width": 16
+                      "width": 14
                     }
                   },
                   {
                     "type": "avatar",
                     "props": {
-                      "size": 32,
+                      "size": 30,
                       "url": "https://www.youtube.com/s/desktop/yt_1200.png"
                     }
                   }
@@ -102,7 +105,6 @@
             "Videojuegos",
             "Noticias",
             "Podcasts",
-            "Cocina",
             "Deportes"
           ]
         }
@@ -111,7 +113,7 @@
         "id": "hero",
         "type": "hero",
         "props": {
-          "height": 210
+          "height": 200
         },
         "source": "getHome.rows.0.items",
         "style": {
@@ -124,8 +126,8 @@
         "title": "Tendencias",
         "source": "getHome.rows.0.items",
         "props": {
-          "height": 200,
-          "itemWidth": 160,
+          "height": 190,
+          "itemWidth": 150,
           "showTitle": true
         }
       },
@@ -135,8 +137,8 @@
         "title": "Música y conciertos",
         "source": "getHome.rows.1.items",
         "props": {
-          "height": 200,
-          "itemWidth": 160,
+          "height": 190,
+          "itemWidth": 150,
           "showTitle": true
         }
       },
@@ -146,8 +148,8 @@
         "title": "Documentales",
         "source": "getHome.rows.2.items",
         "props": {
-          "height": 200,
-          "itemWidth": 160,
+          "height": 190,
+          "itemWidth": 150,
           "showTitle": true
         }
       },
@@ -157,16 +159,15 @@
         "title": "Películas y cortos",
         "source": "getHome.rows.3.items",
         "props": {
-          "height": 200,
-          "itemWidth": 160,
+          "height": 190,
+          "itemWidth": 150,
           "showTitle": true
         }
       },
       {
-        "id": "spacer_bottom",
         "type": "spacer",
         "props": {
-          "height": 90
+          "height": 96
         }
       }
     ]

@@ -1,18 +1,37 @@
 {
   "id": "youtube-demo-structures",
   "name": "YouTube Demo",
-  "version": "3.0.0",
-  "description": "Demo completo con UI custom (structures). Home, búsqueda, ficha y player definidos en el repo para mobile, TV y desktop. Lógica YouTube con Data API + Innertube + Invidious/Piped.",
+  "version": "2.1.0",
+  "description": "Demo movil completo: home, buscar (scroll), ficha con player estilo YouTube, biblioteca e historial, ajustes.",
   "author": "Nuvio Demo",
   "entry": "plugin.js",
   "icon": "https://www.youtube.com/s/desktop/yt_1200.png",
   "banner": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
   "hasCustomUi": true,
-  "uiPlatforms": ["mobile", "tv", "desktop"],
-  "capabilities": ["home", "search", "meta", "streams"],
-  "categories": ["movies", "music", "live", "mixed"],
-  "contentTypes": ["movies", "music", "live"],
-  "languages": ["es", "en"],
+  "uiPlatforms": [
+    "mobile"
+  ],
+  "capabilities": [
+    "home",
+    "search",
+    "meta",
+    "streams"
+  ],
+  "categories": [
+    "movies",
+    "music",
+    "live",
+    "mixed"
+  ],
+  "contentTypes": [
+    "movies",
+    "music",
+    "live"
+  ],
+  "languages": [
+    "es",
+    "en"
+  ],
   "theme": {
     "accent": "#FF0000",
     "background": "#0F0F0F",
@@ -33,7 +52,15 @@
       "label": "Región",
       "type": "select",
       "defaultValue": "MX",
-      "options": ["MX", "ES", "AR", "CO", "CL", "US", "BR"],
+      "options": [
+        "MX",
+        "ES",
+        "AR",
+        "CO",
+        "CL",
+        "US",
+        "BR"
+      ],
       "description": "Código de país para tendencias y búsquedas"
     },
     {
@@ -41,7 +68,11 @@
       "label": "Idioma preferido",
       "type": "select",
       "defaultValue": "es",
-      "options": ["es", "en", "pt"],
+      "options": [
+        "es",
+        "en",
+        "pt"
+      ],
       "description": "Idioma de la interfaz de YouTube (hl)"
     }
   ]

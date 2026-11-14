@@ -3,41 +3,101 @@
   "title": "Buscar",
   "root": {
     "id": "search_root",
-    "type": "column",
-    "style": { "backgroundColor": "#0F0F0F" },
+    "type": "scroll",
+    "style": {
+      "backgroundColor": "#0F0F0F"
+    },
     "children": [
       {
-        "id": "search_header",
+        "id": "appbar_search",
         "type": "container",
-        "style": { "backgroundColor": "#0F0F0F", "padding": { "x": 12, "y": 8 } },
+        "style": {
+          "backgroundColor": "#0F0F0F",
+          "padding": {
+            "l": 4,
+            "r": 8,
+            "t": 4,
+            "b": 0
+          }
+        },
         "children": [
           {
-            "type": "searchBar",
-            "title": "Buscar en YouTube",
+            "type": "row",
             "props": {
-              "placeholder": "Buscar vídeos, canales, listas..."
-            }
+              "crossAxisAlignment": "center"
+            },
+            "children": [
+              {
+                "type": "icon",
+                "props": {
+                  "name": "search",
+                  "size": 22
+                },
+                "style": {
+                  "color": "#FF0000"
+                }
+              },
+              {
+                "type": "spacer",
+                "props": {
+                  "width": 8
+                }
+              },
+              {
+                "type": "text",
+                "title": "Buscar",
+                "style": {
+                  "fontSize": 18,
+                  "fontWeight": "bold",
+                  "color": "#FFFFFF"
+                }
+              }
+            ]
           }
         ]
+      },
+      {
+        "type": "searchBar",
+        "title": "Buscar en YouTube",
+        "props": {
+          "placeholder": "Buscar vídeos, canales, listas..."
+        }
       },
       {
         "id": "search_filters",
         "type": "chips",
         "props": {
-          "options": ["Vídeos", "Canales", "Listas", "En directo", "Cortos"]
+          "options": [
+            "Vídeos",
+            "Canales",
+            "Listas",
+            "En directo",
+            "Cortos"
+          ]
         }
       },
       {
         "id": "search_results",
         "type": "list",
         "source": "search.results",
-        "props": { "showTitle": true },
-        "children": []
+        "props": {
+          "showTitle": true
+        }
       },
       {
-        "id": "search_empty",
-        "type": "emptyState",
-        "title": "Escribe algo para buscar en YouTube"
+        "id": "search_empty_hint",
+        "type": "text",
+        "title": "Escribe y pulsa buscar en el teclado",
+        "style": {
+          "fontSize": 13,
+          "color": "#666666"
+        }
+      },
+      {
+        "type": "spacer",
+        "props": {
+          "height": 96
+        }
       }
     ]
   }

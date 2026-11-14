@@ -2,9 +2,29 @@
   "type": "bottom",
   "initial": "home",
   "items": [
-    { "id": "home", "label": "Inicio", "icon": "home", "page": "home" },
-    { "id": "search", "label": "Buscar", "icon": "search", "page": "search" },
-    { "id": "library", "label": "Biblioteca", "icon": "library", "page": "library" },
-    { "id": "settings", "label": "Ajustes", "icon": "settings", "page": "settings" }
+    {
+      "id": "home",
+      "label": "Inicio",
+      "icon": "home",
+      "page": "home"
+    },
+    {
+      "id": "search",
+      "label": "Buscar",
+      "icon": "search",
+      "page": "search"
+    },
+    {
+      "id": "library",
+      "label": "Biblioteca",
+      "icon": "library",
+      "page": "library"
+    },
+    {
+      "id": "settings",
+      "label": "Ajustes",
+      "icon": "settings",
+      "page": "settings"
+    }
   ]
 }
