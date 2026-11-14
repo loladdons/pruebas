@@ -1,7 +1,7 @@
 {
   "id": "youtube-demo-structures",
   "name": "YouTube Demo",
-  "version": "2.2.0",
+  "version": "3.2.0",
   "description": "Demo movil completo: home, buscar (scroll), ficha con player estilo YouTube, biblioteca e historial, ajustes.",
   "author": "Nuvio Demo",
   "entry": "plugin.js",
