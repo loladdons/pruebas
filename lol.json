@@ -1,18 +1,18 @@
 {
-  "id": "okru",
-  "name": "OKRu",
+  "id": "jkanime",
+  "name": "JKAnime",
   "version": "1.0.0",
-  "description": "Videos y series de ok.ru (Odnoklassniki). Home, buscar, biblioteca y ajustes. Sin descubrir.",
-  "author": "ByAyzen / adaptado",
-  "icon": "https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ok.ru/video/c12842395&size=128",
-  "iconUrl": "https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ok.ru/video/c12842395&size=128",
-  "logo": "https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ok.ru/video/c12842395&size=128",
-  "language": "ru",
-  "languages": ["ru", "es"],
-  "types": ["movie", "series"],
-  "baseUrl": "https://ok.ru",
-  "entryJs": "okru.js",
-  "jsFile": "okru.js",
+  "description": "Anime subtitulado desde jkanime.net. Home, buscar, biblioteca y ajustes. Sin descubrir.",
+  "author": "stormunblessed / adaptado",
+  "icon": "https://www.google.com/s2/favicons?domain=jkanime.net&sz=128",
+  "iconUrl": "https://www.google.com/s2/favicons?domain=jkanime.net&sz=128",
+  "logo": "https://www.google.com/s2/favicons?domain=jkanime.net&sz=128",
+  "language": "es",
+  "languages": ["es"],
+  "types": ["series", "movie"],
+  "baseUrl": "https://jkanime.net",
+  "entryJs": "jkanime.js",
+  "jsFile": "jkanime.js",
   "tabs": ["home", "search", "library", "settings"],
   "capabilities": ["home", "search", "meta", "streams", "library", "settings", "news"],
   "searchImageStyle": "poster",
@@ -24,16 +24,13 @@
       "label": "Añadir \"vose\" a cada búsqueda",
       "type": "boolean",
       "defaultValue": "false",
-      "description": "Si está activo, después de lo que escribas se añade automáticamente un espacio y la palabra vose (ej: matrix → matrix vose). Si está desactivado, se busca exactamente lo que escribes."
+      "description": "Si está activo, después de lo que escribas se añade automáticamente un espacio y la palabra vose. Si está desactivado, se busca exactamente lo que escribes."
     }
   ],
   "catalogs": [
-    { "id": "showcase", "title": "Videos" },
-    { "id": "soviet", "title": "Soviet" },
-    { "id": "drama", "title": "Drama" },
-    { "id": "action", "title": "Action" },
-    { "id": "family", "title": "Family" },
-    { "id": "comedy", "title": "Comedy" },
-    { "id": "serial", "title": "Series" }
+    { "id": "ultimos", "title": "Últimos episodios" },
+    { "id": "emision", "title": "En emisión" },
+    { "id": "animes", "title": "Animes" },
+    { "id": "peliculas", "title": "Películas" }
   ]
 }
