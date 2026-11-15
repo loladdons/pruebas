@@ -1,79 +1,39 @@
 {
-  "id": "youtube-demo-structures",
-  "name": "YouTube Demo",
-  "version": "3.2.0",
-  "description": "Demo movil completo: home, buscar (scroll), ficha con player estilo YouTube, biblioteca e historial, ajustes.",
-  "author": "Nuvio Demo",
-  "entry": "plugin.js",
-  "icon": "https://www.youtube.com/s/desktop/yt_1200.png",
-  "banner": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
-  "hasCustomUi": true,
-  "uiPlatforms": [
-    "mobile"
-  ],
-  "capabilities": [
-    "home",
-    "search",
-    "meta",
-    "streams"
-  ],
-  "categories": [
-    "movies",
-    "music",
-    "live",
-    "mixed"
-  ],
-  "contentTypes": [
-    "movies",
-    "music",
-    "live"
-  ],
-  "languages": [
-    "es",
-    "en"
-  ],
-  "theme": {
-    "accent": "#FF0000",
-    "background": "#0F0F0F",
-    "surface": "#212121",
-    "highlight": "#FF0000"
-  },
+  "id": "okru",
+  "name": "OKRu",
+  "version": "1.0.0",
+  "description": "Videos y series de ok.ru (Odnoklassniki). Home, buscar, biblioteca y ajustes. Sin descubrir.",
+  "author": "ByAyzen / adaptado",
+  "icon": "https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ok.ru/video/c12842395&size=128",
+  "iconUrl": "https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ok.ru/video/c12842395&size=128",
+  "logo": "https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ok.ru/video/c12842395&size=128",
+  "language": "ru",
+  "languages": ["ru", "es"],
+  "types": ["movie", "series"],
+  "baseUrl": "https://ok.ru",
+  "entryJs": "okru.js",
+  "jsFile": "okru.js",
+  "tabs": ["home", "search", "library", "settings"],
+  "capabilities": ["home", "search", "meta", "streams", "library", "settings", "news"],
+  "searchImageStyle": "poster",
+  "searchShowTitle": true,
+  "newsImageStyle": "poster",
   "config": [
     {
-      "key": "api_key",
-      "label": "YouTube Data API Key (opcional)",
-      "type": "password",
-      "description": "Si la pones se usa Data API v3. Si no, Innertube + Invidious/Piped.",
-      "placeholder": "AIza...",
-      "required": false
-    },
-    {
-      "key": "region_code",
-      "label": "Región",
-      "type": "select",
-      "defaultValue": "MX",
-      "options": [
-        "MX",
-        "ES",
-        "AR",
-        "CO",
-        "CL",
-        "US",
-        "BR"
-      ],
-      "description": "Código de país para tendencias y búsquedas"
-    },
-    {
-      "key": "preferred_lang",
-      "label": "Idioma preferido",
-      "type": "select",
-      "defaultValue": "es",
-      "options": [
-        "es",
-        "en",
-        "pt"
-      ],
-      "description": "Idioma de la interfaz de YouTube (hl)"
+      "key": "appendVose",
+      "label": "Añadir \"vose\" a cada búsqueda",
+      "type": "boolean",
+      "defaultValue": "false",
+      "description": "Si está activo, después de lo que escribas se añade automáticamente un espacio y la palabra vose (ej: matrix → matrix vose). Si está desactivado, se busca exactamente lo que escribes."
     }
+  ],
+  "catalogs": [
+    { "id": "showcase", "title": "Videos" },
+    { "id": "soviet", "title": "Soviet" },
+    { "id": "drama", "title": "Drama" },
+    { "id": "action", "title": "Action" },
+    { "id": "family", "title": "Family" },
+    { "id": "comedy", "title": "Comedy" },
+    { "id": "serial", "title": "Series" }
   ]
 }
